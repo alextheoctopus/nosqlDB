@@ -11,8 +11,8 @@ import kotlinx.serialization.Serializable
 data class HealthResponse(val status: String)
 
 fun main() {
-    val port = System.getenv("APP_PORT") ?: "8080"
-    val host = System.getenv("DB_HOST") ?: "0.0.0.0"
+    val port = System.getenv("APP_PORT")
+    val host = System.getenv("APP_HOST")
     println("EventHub started on port=$port, dbHost=$host")
     embeddedServer(Netty, port = port.toInt(), host = host, module = Application::module)
         .start(wait = true)

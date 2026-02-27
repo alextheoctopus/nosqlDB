@@ -4,4 +4,4 @@ services:
     env_file:
       - .env.local
     ports:
-      - "${APP_PORT}:${APP_PORT}"
+      - "${APP_HOST}:${APP_PORT}:${APP_PORT}"
