@@ -4,11 +4,11 @@ services:
     env_file:
       - .env.local
     ports:
-      - "8080:8080"
+      - "${APP_PORT}:${APP_PORT}"
     depends_on:
       - redis
 
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+       - "${REDIS_PORT}:${REDIS_PORT}"

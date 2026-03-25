@@ -76,13 +76,13 @@ fun Application.module(config: AppConfig = loadConfig()) {
 }
 
 private fun loadConfig(): AppConfig = AppConfig(
-    port = System.getenv("APP_PORT")?.trim()?.toIntOrNull() ?: 8080,
-    host = System.getenv("APP_HOST")?.trim()?.trim('"') ?: "0.0.0.0",
-    sessionTtlSeconds = System.getenv("APP_USER_SESSION_TTL")?.trim()?.substringBefore("#")?.trim()?.toLongOrNull() ?: 60,
-    redisHost = System.getenv("REDIS_HOST")?.trim() ?: "redis",
-    redisPort = System.getenv("REDIS_PORT")?.trim()?.toIntOrNull() ?: 6379,
-    redisPassword = System.getenv("REDIS_PASSWORD")?.trim()?.ifBlank { null },
-    redisDb = System.getenv("REDIS_DB")?.trim()?.toIntOrNull() ?: 0,
+    port = System.getenv("APP_PORT").trim().toInt(),
+    host = System.getenv("APP_HOST").trim().trim('"') ,
+    sessionTtlSeconds = System.getenv("APP_USER_SESSION_TTL").trim().substringBefore("#").trim().toLong(),
+    redisHost = System.getenv("REDIS_HOST").trim(),
+    redisPort = System.getenv("REDIS_PORT").trim().toInt(),
+    redisPassword = System.getenv("REDIS_PASSWORD").trim().ifBlank { null },
+    redisDb = System.getenv("REDIS_DB").trim().toInt(),
 )
 
 private fun createJedisPool(config: AppConfig): JedisPool {
