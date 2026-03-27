@@ -22,6 +22,9 @@ dependencies {
 
     implementation("ch.qos.logback:logback-classic:1.4.14")
     implementation("redis.clients:jedis:5.2.0")
+    implementation(platform("org.mongodb:mongodb-driver-bom:5.5.0"))
+    implementation("org.mongodb:mongodb-driver-kotlin-sync")
+    implementation("org.mindrot:jbcrypt:0.4")
 }
 
 kotlin {
