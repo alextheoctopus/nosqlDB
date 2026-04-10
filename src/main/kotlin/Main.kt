@@ -631,11 +631,11 @@ private fun loadConfig(): AppConfig = AppConfig(
     sessionTtlSeconds = System.getenv("APP_USER_SESSION_TTL").trim().substringBefore("#").trim().toLong(),
     redisHost = System.getenv("REDIS_HOST").trim(),
     redisPort = System.getenv("REDIS_PORT").trim().toInt(),
-    redisPassword = System.getenv("REDIS_PASSWORD")?.trim(),
+    redisPassword = System.getenv("REDIS_PASSWORD")?.trim()?.ifBlank { null },
     redisDb = System.getenv("REDIS_DB").trim().toInt(),
     mongoDatabase = System.getenv("MONGODB_DATABASE").trim().trim('"'),
-    mongoUser = System.getenv("MONGODB_USER")?.trim(),
-    mongoPassword = System.getenv("MONGODB_PASSWORD")?.trim(),
+    mongoUser = System.getenv("MONGODB_USER")?.trim()?.ifBlank { null },
+    mongoPassword = System.getenv("MONGODB_PASSWORD")?.trim()?.ifBlank { null },
     mongoHost = System.getenv("MONGODB_HOST").trim(),
     mongoPort = System.getenv("MONGODB_PORT").trim().toInt(),
 )
@@ -647,7 +647,7 @@ private fun createJedisPool(config: AppConfig): JedisPool {
         minIdle = 0
     }
 
-    return if (config.redisPassword != null) {
+    return if (!config.redisPassword.isNullOrBlank()) {
         JedisPool(poolConfig, config.redisHost, config.redisPort, 2_000, config.redisPassword, config.redisDb)
     } else {
         JedisPool(poolConfig, config.redisHost, config.redisPort, 2_000, null, config.redisDb)
