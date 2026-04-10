@@ -136,9 +136,7 @@ fun Application.module(config: AppConfig = loadConfig()) {
         }
         //проверка health
         get("/health") {
-            extractValidSid(call.request)?.let { sid ->
-                setSessionCookie(call, sid, config.sessionTtlSeconds)
-            }
+            setSessionCookieIfExists(call, sessionService, config.sessionTtlSeconds)
             call.respond(HealthResponse("ok"))
         }
         post("/session") {
@@ -151,14 +149,12 @@ fun Application.module(config: AppConfig = loadConfig()) {
         }
         post("/users") {
             val existingSid = extractValidSid(call.request)
-            if (existingSid != null) {
-                sessionService.refreshIfExists(existingSid)
-            }
+            val hasActiveSession = existingSid != null && sessionService.refreshIfExists(existingSid)
 
             val payload = runCatching { call.receive<UserCreateRequest>() }.getOrNull()
             if (payload == null) {
-                if (existingSid != null) {
-                    setSessionCookie(call, existingSid, config.sessionTtlSeconds)
+                if (hasActiveSession) {
+                    setSessionCookie(call, existingSid!!, config.sessionTtlSeconds)
                 }
                 call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"body\" field"))
                 return@post
@@ -166,8 +162,8 @@ fun Application.module(config: AppConfig = loadConfig()) {
 
             val invalidField = validateUserCreateRequest(payload)
             if (invalidField != null) {
-                if (existingSid != null) {
-                    setSessionCookie(call, existingSid, config.sessionTtlSeconds)
+                if (hasActiveSession) {
+                    setSessionCookie(call, existingSid!!, config.sessionTtlSeconds)
                 }
                 call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"$invalidField\" field"))
                 return@post
@@ -176,15 +172,15 @@ fun Application.module(config: AppConfig = loadConfig()) {
             val passwordHash = BCrypt.hashpw(payload.password!!, BCrypt.gensalt())
             val createdUserId = userRepository.createUser(payload.fullName!!, payload.username!!, passwordHash)
             if (createdUserId == null) {
-                if (existingSid != null) {
-                    setSessionCookie(call, existingSid, config.sessionTtlSeconds)
+                if (hasActiveSession) {
+                    setSessionCookie(call, existingSid!!, config.sessionTtlSeconds)
                 }
                 call.respond(HttpStatusCode.Conflict, ErrorResponse("user already exists"))
                 return@post
             }
 
-            if (existingSid != null) {
-                sessionService.deleteSession(existingSid)
+            if (hasActiveSession) {
+                sessionService.deleteSession(existingSid!!)
             }
             val newSid = sessionService.createBoundSession(createdUserId)
             setSessionCookie(call, newSid, config.sessionTtlSeconds)
@@ -239,7 +235,13 @@ fun Application.module(config: AppConfig = loadConfig()) {
         }
 
         post("/auth/logout") {
-            extractValidSid(call.request)?.let { sessionService.deleteSession(it) }
+            val sid = extractValidSid(call.request)
+            if (sid == null || !sessionService.refreshIfExists(sid)) {
+                call.respond(HttpStatusCode.Unauthorized)
+                return@post
+            }
+
+            sessionService.deleteSession(sid)
             expireSessionCookie(call)
             call.respond(HttpStatusCode.NoContent)
         }
@@ -272,7 +274,7 @@ fun Application.module(config: AppConfig = loadConfig()) {
 
             val eventId = eventRepository.createEvent(
                 title = payload.title!!,
-                description = payload.description!!,
+                description = payload.description.orEmpty(),
                 address = payload.address!!,
                 createdBy = userId,
                 startedAt = payload.startedAt!!,
@@ -288,7 +290,7 @@ fun Application.module(config: AppConfig = loadConfig()) {
         }
 
         get("/events") {
-            refreshAndSetSessionCookieIfExists(call, sessionService, config.sessionTtlSeconds)
+            setSessionCookieIfExists(call, sessionService, config.sessionTtlSeconds)
 
             val title = call.request.queryParameters["title"]
             val limitRaw = call.request.queryParameters["limit"]
@@ -349,11 +351,13 @@ private fun createJedisPool(config: AppConfig): JedisPool {
 
 
 private fun createMongoClient(config: AppConfig): MongoClient {
-    val connectionString = if (!config.mongoUser.isNullOrBlank() && !config.mongoPassword.isNullOrBlank()) {
-        "mongodb://${config.mongoUser}:${config.mongoPassword}@${config.mongoHost}:${config.mongoPort}/${config.mongoDatabase}?authSource=${config.mongoDatabase}"
-    } else {
-        "mongodb://${config.mongoHost}:${config.mongoPort}/${config.mongoDatabase}"
-    }
+    val connectionString =
+        if (!config.mongoUser.isNullOrBlank() && !config.mongoPassword.isNullOrBlank()) {
+            "mongodb://${config.mongoUser}:${config.mongoPassword}@${config.mongoHost}:${config.mongoPort}/${config.mongoDatabase}?authSource=${config.mongoDatabase}"
+        } else {
+            "mongodb://${config.mongoHost}:${config.mongoPort}/${config.mongoDatabase}"
+        }
+
     return MongoClient.create(connectionString)
 }
 
@@ -373,9 +377,13 @@ private fun setSessionCookie(call: ApplicationCall, sid: String, ttlSeconds: Lon
         )
     )
 }
-private fun refreshAndSetSessionCookieIfExists(call: ApplicationCall, sessionService: RedisSessionService, ttlSeconds: Long) {
+private fun setSessionCookieIfExists(
+    call: ApplicationCall,
+    sessionService: RedisSessionService,
+    ttlSeconds: Long,
+) {
     extractValidSid(call.request)?.let { sid ->
-        if (sessionService.refreshIfExists(sid)) {
+        if (sessionService.exists(sid)) {
             setSessionCookie(call, sid, ttlSeconds)
         }
     }
@@ -417,7 +425,6 @@ private fun validateEventCreateRequest(request: EventCreateRequest): String? {
     if (request.address.isNullOrBlank()) return "address"
     if (request.startedAt.isNullOrBlank()) return "started_at"
     if (request.finishedAt.isNullOrBlank()) return "finished_at"
-    if (request.description.isNullOrBlank()) return "description"
 
     val startedAt = parseRfc3339(request.startedAt) ?: return "started_at"
     val finishedAt = parseRfc3339(request.finishedAt) ?: return "finished_at"
@@ -445,6 +452,12 @@ private class RedisSessionService(
     private val jedisPool: JedisPool,
     private val ttlSeconds: Long,
 ) {
+    fun exists(sid: String): Boolean {
+        return jedisPool.resource.use { jedis ->
+            jedis.exists(sessionKey(sid))
+        }
+    }
+
     fun createOrRefreshSession(requestSid: String?): SessionResult {
         if (requestSid == null) {
             val sid = createNewAnonymousSession()
@@ -601,6 +614,7 @@ private class MongoEventRepository(database: MongoDatabase) {
         }
     }
 
+
     fun findEvents(title: String?, limit: Int?, offset: Int?): List<EventResponse> {
         val filter: Bson = if (title.isNullOrBlank()) {
             Document()
@@ -609,6 +623,7 @@ private class MongoEventRepository(database: MongoDatabase) {
         }
 
         val iterable = collection.find(filter)
+            .sort(ascending("_id"))
             .skip(offset ?: 0)
             .let { if (limit != null) it.limit(limit) else it }
 
