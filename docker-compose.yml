@@ -12,13 +12,16 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-       - "${REDIS_PORT}:${REDIS_PORT}"
+      - "${REDIS_PORT}:${REDIS_PORT}"
 
   mongodb:
     image: mongo:7.0
     environment:
-      MONGO_INITDB_ROOT_USERNAME: ${MONGODB_USER}
-      MONGO_INITDB_ROOT_PASSWORD: ${MONGODB_PASSWORD}
+      MONGO_INITDB_ROOT_USERNAME: ${MONGODB_ROOT_USER}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGODB_ROOT_PASSWORD}
+      MONGO_INITDB_DATABASE: ${MONGODB_DATABASE}
     ports:
       - "${MONGODB_PORT}:${MONGODB_PORT}"
-    command: ["--port", "${MONGODB_PORT}"]
+    command: [ "--port", "${MONGODB_PORT}" ]
+    volumes:
+      - ./mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro

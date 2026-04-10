@@ -151,21 +151,24 @@ fun Application.module(config: AppConfig = loadConfig()) {
         }
         post("/users") {
             val existingSid = extractValidSid(call.request)
-            if (existingSid == null || !sessionService.refreshIfExists(existingSid)) {
-                call.respond(HttpStatusCode.Unauthorized)
-                return@post
+            if (existingSid != null) {
+                sessionService.refreshIfExists(existingSid)
             }
 
             val payload = runCatching { call.receive<UserCreateRequest>() }.getOrNull()
             if (payload == null) {
-                setSessionCookie(call, existingSid, config.sessionTtlSeconds)
+                if (existingSid != null) {
+                    setSessionCookie(call, existingSid, config.sessionTtlSeconds)
+                }
                 call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"body\" field"))
                 return@post
             }
 
             val invalidField = validateUserCreateRequest(payload)
             if (invalidField != null) {
-                setSessionCookie(call, existingSid, config.sessionTtlSeconds)
+                if (existingSid != null) {
+                    setSessionCookie(call, existingSid, config.sessionTtlSeconds)
+                }
                 call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"$invalidField\" field"))
                 return@post
             }
@@ -173,12 +176,16 @@ fun Application.module(config: AppConfig = loadConfig()) {
             val passwordHash = BCrypt.hashpw(payload.password!!, BCrypt.gensalt())
             val createdUserId = userRepository.createUser(payload.fullName!!, payload.username!!, passwordHash)
             if (createdUserId == null) {
-                setSessionCookie(call, existingSid, config.sessionTtlSeconds)
+                if (existingSid != null) {
+                    setSessionCookie(call, existingSid, config.sessionTtlSeconds)
+                }
                 call.respond(HttpStatusCode.Conflict, ErrorResponse("user already exists"))
                 return@post
             }
 
-            sessionService.deleteSession(existingSid)
+            if (existingSid != null) {
+                sessionService.deleteSession(existingSid)
+            }
             val newSid = sessionService.createBoundSession(createdUserId)
             setSessionCookie(call, newSid, config.sessionTtlSeconds)
             call.respond(HttpStatusCode.Created)
@@ -342,8 +349,8 @@ private fun createJedisPool(config: AppConfig): JedisPool {
 
 
 private fun createMongoClient(config: AppConfig): MongoClient {
-    val connectionString = if (config.mongoUser != null && config.mongoPassword != null) {
-        "mongodb://${config.mongoUser}:${config.mongoPassword}@${config.mongoHost}:${config.mongoPort}/${config.mongoDatabase}?authSource=admin"
+    val connectionString = if (!config.mongoUser.isNullOrBlank() && !config.mongoPassword.isNullOrBlank()) {
+        "mongodb://${config.mongoUser}:${config.mongoPassword}@${config.mongoHost}:${config.mongoPort}/${config.mongoDatabase}?authSource=${config.mongoDatabase}"
     } else {
         "mongodb://${config.mongoHost}:${config.mongoPort}/${config.mongoDatabase}"
     }
