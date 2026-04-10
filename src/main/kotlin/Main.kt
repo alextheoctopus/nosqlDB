@@ -1,5 +1,8 @@
 import com.mongodb.MongoWriteException
+import com.mongodb.client.model.Filters.and
 import com.mongodb.client.model.Filters.eq
+import com.mongodb.client.model.Filters.gte
+import com.mongodb.client.model.Filters.lte
 import com.mongodb.client.model.Filters.regex
 import com.mongodb.client.model.IndexOptions
 import com.mongodb.client.model.Indexes.ascending
@@ -18,19 +21,26 @@ import io.ktor.server.routing.*
 import io.ktor.serialization.kotlinx.json.*
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
 import org.bson.Document
 import org.bson.conversions.Bson
+import org.bson.types.ObjectId
 import org.mindrot.jbcrypt.BCrypt
 import redis.clients.jedis.JedisPool
 import redis.clients.jedis.JedisPoolConfig
 import java.security.SecureRandom
 import java.time.Instant
+import java.time.LocalDate
 import java.time.OffsetDateTime
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
 import java.time.format.DateTimeParseException
 
 private const val SESSION_COOKIE_NAME = "X-Session-Id"
 private val SID_REGEX = Regex("^[a-f0-9]{32}$")
 private val secureRandom = SecureRandom()
+private val EVENT_CATEGORIES = setOf("meetup", "concert", "exhibition", "party", "other")
+private val BASIC_DATE_FORMATTER: DateTimeFormatter = DateTimeFormatter.BASIC_ISO_DATE
 
 @Serializable
 data class HealthResponse(val status: String)
@@ -61,15 +71,27 @@ data class EventCreateRequest(
 )
 
 @Serializable
+data class EventPatchRequest(
+    val category: String? = null,
+    val price: Int? = null,
+    val city: String? = null,
+)
+
+@Serializable
 data class CreateEventResponse(val id: String)
 
 @Serializable
-data class EventLocationResponse(val address: String)
+data class EventLocationResponse(
+    val city: String? = null,
+    val address: String,
+)
 
 @Serializable
 data class EventResponse(
     val id: String,
     val title: String,
+    val category: String,
+    val price: Int,
     val description: String,
     val location: EventLocationResponse,
     @SerialName("created_at") val createdAt: String,
@@ -81,6 +103,19 @@ data class EventResponse(
 @Serializable
 data class EventsListResponse(
     val events: List<EventResponse>,
+    val count: Int,
+)
+
+@Serializable
+data class PublicUserResponse(
+    val id: String,
+    @SerialName("full_name") val fullName: String,
+    val username: String,
+)
+
+@Serializable
+data class UsersListResponse(
+    val users: List<PublicUserResponse>,
     val count: Int,
 )
 
@@ -97,6 +132,20 @@ data class AppConfig(
     val mongoPassword: String?,
     val mongoHost: String,
     val mongoPort: Int,
+)
+
+data class EventSearchQuery(
+    val id: ObjectId? = null,
+    val title: String? = null,
+    val category: String? = null,
+    val priceFrom: Int? = null,
+    val priceTo: Int? = null,
+    val city: String? = null,
+    val dateFrom: LocalDate? = null,
+    val dateTo: LocalDate? = null,
+    val createdByUserId: String? = null,
+    val limit: Int? = null,
+    val offset: Int? = null,
 )
 
 fun main() {
@@ -124,29 +173,31 @@ fun Application.module(config: AppConfig = loadConfig()) {
         mongoClient.close()
     }
 
-
     install(ContentNegotiation) {
-        json()
+        json(Json {
+            explicitNulls = false
+            ignoreUnknownKeys = true
+        })
     }
 
     routing {
-        //корневой url
         get("/") {
             call.respondText("It's root url :)")
         }
-        //проверка health
+
         get("/health") {
             setSessionCookieIfExists(call, sessionService, config.sessionTtlSeconds)
             call.respond(HealthResponse("ok"))
         }
+
         post("/session") {
             val requestSid = extractValidSid(call.request)
             val result = sessionService.createOrRefreshSession(requestSid)
             setSessionCookie(call, result.sid, config.sessionTtlSeconds)
             call.response.status(result.status)
             call.respondBytes(ByteArray(0))
-
         }
+
         post("/users") {
             val existingSid = extractValidSid(call.request)
             val hasActiveSession = existingSid != null && sessionService.refreshIfExists(existingSid)
@@ -185,6 +236,98 @@ fun Application.module(config: AppConfig = loadConfig()) {
             val newSid = sessionService.createBoundSession(createdUserId)
             setSessionCookie(call, newSid, config.sessionTtlSeconds)
             call.respond(HttpStatusCode.Created)
+        }
+
+        get("/users") {
+            setSessionCookieIfExists(call, sessionService, config.sessionTtlSeconds)
+
+            val limitRaw = call.request.queryParameters["limit"]
+            val offsetRaw = call.request.queryParameters["offset"]
+            val name = call.request.queryParameters["name"]
+            val idRaw = call.request.queryParameters["id"]
+
+            val limit = parseUIntParameter(limitRaw)
+            if (limitRaw != null && limit == null) {
+                call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"limit\" field"))
+                return@get
+            }
+
+            val offset = parseUIntParameter(offsetRaw)
+            if (offsetRaw != null && offset == null) {
+                call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"offset\" field"))
+                return@get
+            }
+
+            if (name != null && name.isBlank()) {
+                call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"name\" field"))
+                return@get
+            }
+
+            val id = if (idRaw == null) {
+                null
+            } else {
+                parseObjectId(idRaw) ?: run {
+                    call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"id\" field"))
+                    return@get
+                }
+            }
+
+            val users = userRepository.findUsers(
+                id = id,
+                name = name,
+                limit = limit,
+                offset = offset,
+            )
+
+            call.respond(UsersListResponse(users, users.size))
+        }
+
+        get("/users/{id}/events") {
+            setSessionCookieIfExists(call, sessionService, config.sessionTtlSeconds)
+
+            val userIdRaw = call.parameters["id"]
+            val userId = if (userIdRaw == null) {
+                call.respond(HttpStatusCode.NotFound, ErrorResponse("User not found"))
+                return@get
+            } else {
+                parseObjectId(userIdRaw) ?: run {
+                    call.respond(HttpStatusCode.NotFound, ErrorResponse("User not found"))
+                    return@get
+                }
+            }
+
+            if (!userRepository.existsById(userId)) {
+                call.respond(HttpStatusCode.NotFound, ErrorResponse("User not found"))
+                return@get
+            }
+
+            val events = eventRepository.findEvents(
+                EventSearchQuery(createdByUserId = userId.toHexString())
+            )
+            call.respond(EventsListResponse(events, events.size))
+        }
+
+        get("/users/{id}") {
+            setSessionCookieIfExists(call, sessionService, config.sessionTtlSeconds)
+
+            val idRaw = call.parameters["id"]
+            val id = if (idRaw == null) {
+                call.respond(HttpStatusCode.NotFound, ErrorResponse("Not found"))
+                return@get
+            } else {
+                parseObjectId(idRaw) ?: run {
+                    call.respond(HttpStatusCode.NotFound, ErrorResponse("Not found"))
+                    return@get
+                }
+            }
+
+            val user = userRepository.findPublicById(id)
+            if (user == null) {
+                call.respond(HttpStatusCode.NotFound, ErrorResponse("Not found"))
+                return@get
+            }
+
+            call.respond(user)
         }
 
         post("/auth/login") {
@@ -289,32 +432,195 @@ fun Application.module(config: AppConfig = loadConfig()) {
             call.respond(HttpStatusCode.Created, CreateEventResponse(eventId))
         }
 
+        patch("/events/{id}") {
+            val sid = extractValidSid(call.request)
+            if (sid == null || !sessionService.refreshIfExists(sid)) {
+                call.respond(HttpStatusCode.Unauthorized)
+                return@patch
+            }
+            setSessionCookie(call, sid, config.sessionTtlSeconds)
+
+            val userId = sessionService.getUserId(sid)
+            if (userId == null) {
+                call.respond(HttpStatusCode.Unauthorized)
+                return@patch
+            }
+
+            val eventIdRaw = call.parameters["id"]
+            val eventId = if (eventIdRaw == null) {
+                call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"id\" field"))
+                return@patch
+            } else {
+                parseObjectId(eventIdRaw) ?: run {
+                    call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"id\" field"))
+                    return@patch
+                }
+            }
+
+            val payload = runCatching { call.receive<EventPatchRequest>() }.getOrNull()
+            if (payload == null) {
+                call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"body\" field"))
+                return@patch
+            }
+
+            val invalidField = validateEventPatchRequest(payload)
+            if (invalidField != null) {
+                call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"$invalidField\" field"))
+                return@patch
+            }
+
+            val updated = eventRepository.patchEvent(
+                id = eventId,
+                organizerId = userId,
+                category = payload.category,
+                price = payload.price,
+                city = payload.city,
+            )
+
+            if (!updated) {
+                call.respond(
+                    HttpStatusCode.NotFound,
+                    ErrorResponse("Not found. Be sure that event exists and you are the organizer")
+                )
+                return@patch
+            }
+
+            call.respond(HttpStatusCode.NoContent)
+        }
+
         get("/events") {
             setSessionCookieIfExists(call, sessionService, config.sessionTtlSeconds)
 
             val title = call.request.queryParameters["title"]
+            val idRaw = call.request.queryParameters["id"]
+            val category = call.request.queryParameters["category"]
+            val priceFromRaw = call.request.queryParameters["price_from"]
+            val priceToRaw = call.request.queryParameters["price_to"]
+            val city = call.request.queryParameters["city"]
+            val dateFromRaw = call.request.queryParameters["date_from"]
+            val dateToRaw = call.request.queryParameters["date_to"]
+            val user = call.request.queryParameters["user"]
             val limitRaw = call.request.queryParameters["limit"]
             val offsetRaw = call.request.queryParameters["offset"]
 
+            if (title != null && title.isBlank()) {
+                call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"title\" field"))
+                return@get
+            }
+            if (city != null && city.isBlank()) {
+                call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"city\" field"))
+                return@get
+            }
+            if (user != null && user.isBlank()) {
+                call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"user\" field"))
+                return@get
+            }
+            if (category != null && category !in EVENT_CATEGORIES) {
+                call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"category\" field"))
+                return@get
+            }
+
+            val id = if (idRaw == null) {
+                null
+            } else {
+                parseObjectId(idRaw) ?: run {
+                    call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"id\" field"))
+                    return@get
+                }
+            }
+
+            val priceFrom = parseUIntParameter(priceFromRaw)
+            if (priceFromRaw != null && priceFrom == null) {
+                call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"price_from\" field"))
+                return@get
+            }
+
+            val priceTo = parseUIntParameter(priceToRaw)
+            if (priceToRaw != null && priceTo == null) {
+                call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"price_to\" field"))
+                return@get
+            }
+
+            if (priceFrom != null && priceTo != null && priceTo < priceFrom) {
+                call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"price_to\" field"))
+                return@get
+            }
+
+            val dateFrom = parseBasicDate(dateFromRaw)
+            if (dateFromRaw != null && dateFrom == null) {
+                call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"date_from\" field"))
+                return@get
+            }
+
+            val dateTo = parseBasicDate(dateToRaw)
+            if (dateToRaw != null && dateTo == null) {
+                call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"date_to\" field"))
+                return@get
+            }
+
+            if (dateFrom != null && dateTo != null && dateTo.isBefore(dateFrom)) {
+                call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"date_to\" field"))
+                return@get
+            }
+
             val limit = parseUIntParameter(limitRaw)
             if (limitRaw != null && limit == null) {
-                call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"limit\" parameter"))
+                call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"limit\" field"))
                 return@get
             }
 
             val offset = parseUIntParameter(offsetRaw)
             if (offsetRaw != null && offset == null) {
-                call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"offset\" parameter"))
+                call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"offset\" field"))
                 return@get
             }
 
+            val createdByUserId = if (user == null) {
+                null
+            } else {
+                userRepository.findByUsername(user)?.id ?: "__no_such_user__"
+            }
+
             val events = eventRepository.findEvents(
-                title = title,
-                limit = limit,
-                offset = offset,
+                EventSearchQuery(
+                    id = id,
+                    title = title,
+                    category = category,
+                    priceFrom = priceFrom,
+                    priceTo = priceTo,
+                    city = city,
+                    dateFrom = dateFrom,
+                    dateTo = dateTo,
+                    createdByUserId = createdByUserId,
+                    limit = limit,
+                    offset = offset,
+                )
             )
 
             call.respond(EventsListResponse(events, events.size))
+        }
+
+        get("/events/{id}") {
+            setSessionCookieIfExists(call, sessionService, config.sessionTtlSeconds)
+
+            val idRaw = call.parameters["id"]
+            val id = if (idRaw == null) {
+                call.respond(HttpStatusCode.NotFound, ErrorResponse("Not found"))
+                return@get
+            } else {
+                parseObjectId(idRaw) ?: run {
+                    call.respond(HttpStatusCode.NotFound, ErrorResponse("Not found"))
+                    return@get
+                }
+            }
+
+            val event = eventRepository.findEventById(id)
+            if (event == null) {
+                call.respond(HttpStatusCode.NotFound, ErrorResponse("Not found"))
+                return@get
+            }
+
+            call.respond(event)
         }
     }
 }
@@ -325,14 +631,13 @@ private fun loadConfig(): AppConfig = AppConfig(
     sessionTtlSeconds = System.getenv("APP_USER_SESSION_TTL").trim().substringBefore("#").trim().toLong(),
     redisHost = System.getenv("REDIS_HOST").trim(),
     redisPort = System.getenv("REDIS_PORT").trim().toInt(),
-    redisPassword = System.getenv("REDIS_PASSWORD")?.trim()?.ifBlank { null },
+    redisPassword = System.getenv("REDIS_PASSWORD")?.trim(),
     redisDb = System.getenv("REDIS_DB").trim().toInt(),
-
-    mongoDatabase = System.getenv("MONGODB_DATABASE").trim().trim('"') ,
-    mongoUser = System.getenv("MONGODB_USER").trim(),
-    mongoPassword = System.getenv("MONGODB_PASSWORD").trim(),
-    mongoHost = System.getenv("MONGODB_HOST").trim() ,
-    mongoPort = System.getenv("MONGODB_PORT").trim().toInt() ,
+    mongoDatabase = System.getenv("MONGODB_DATABASE").trim().trim('"'),
+    mongoUser = System.getenv("MONGODB_USER")?.trim(),
+    mongoPassword = System.getenv("MONGODB_PASSWORD")?.trim(),
+    mongoHost = System.getenv("MONGODB_HOST").trim(),
+    mongoPort = System.getenv("MONGODB_PORT").trim().toInt(),
 )
 
 private fun createJedisPool(config: AppConfig): JedisPool {
@@ -348,7 +653,6 @@ private fun createJedisPool(config: AppConfig): JedisPool {
         JedisPool(poolConfig, config.redisHost, config.redisPort, 2_000, null, config.redisDb)
     }
 }
-
 
 private fun createMongoClient(config: AppConfig): MongoClient {
     val connectionString =
@@ -377,6 +681,7 @@ private fun setSessionCookie(call: ApplicationCall, sid: String, ttlSeconds: Lon
         )
     )
 }
+
 private fun setSessionCookieIfExists(
     call: ApplicationCall,
     sessionService: RedisSessionService,
@@ -433,16 +738,45 @@ private fun validateEventCreateRequest(request: EventCreateRequest): String? {
     return null
 }
 
+private fun validateEventPatchRequest(request: EventPatchRequest): String? {
+    if (request.category == null && request.price == null && request.city == null) {
+        return "body"
+    }
+    if (request.category != null && request.category !in EVENT_CATEGORIES) {
+        return "category"
+    }
+    if (request.price != null && request.price < 0) {
+        return "price"
+    }
+    return null
+}
+
 private fun parseRfc3339(value: String): OffsetDateTime? = try {
     OffsetDateTime.parse(value)
 } catch (_: DateTimeParseException) {
     null
 }
 
+private fun parseBasicDate(value: String?): LocalDate? {
+    if (value == null) return null
+    if (value.isBlank()) return null
+    return try {
+        LocalDate.parse(value, BASIC_DATE_FORMATTER)
+    } catch (_: DateTimeParseException) {
+        null
+    }
+}
+
 private fun parseUIntParameter(value: String?): Int? {
     if (value == null) return null
     if (value.isBlank()) return null
     return value.toIntOrNull()?.takeIf { it >= 0 }
+}
+
+private fun parseObjectId(value: String): ObjectId? = try {
+    ObjectId(value)
+} catch (_: IllegalArgumentException) {
+    null
 }
 
 private data class SessionResult(val sid: String, val status: HttpStatusCode)
@@ -501,7 +835,7 @@ private class RedisSessionService(
 
     fun getUserId(sid: String): String? {
         return jedisPool.resource.use { jedis ->
-            jedis.hget(sessionKey(sid), "user_id")?.ifBlank { null }
+            jedis.hget(sessionKey(sid), "user_id")
         }
     }
 
@@ -578,15 +912,57 @@ private class MongoUserRepository(database: MongoDatabase) {
             passwordHash = doc.getString("password_hash")
         )
     }
+
+    fun findPublicById(id: ObjectId): PublicUserResponse? {
+        val doc = collection.find(eq("_id", id)).firstOrNull() ?: return null
+        return documentToPublicUser(doc)
+    }
+
+    fun existsById(id: ObjectId): Boolean = collection.find(eq("_id", id)).limit(1).firstOrNull() != null
+
+    fun findUsers(id: ObjectId?, name: String?, limit: Int?, offset: Int?): List<PublicUserResponse> {
+        val filters = mutableListOf<Bson>()
+        if (id != null) {
+            filters += eq("_id", id)
+        }
+        if (!name.isNullOrBlank()) {
+            filters += regex("full_name", ".*${Regex.escape(name)}.*", "i")
+        }
+
+        val filter = when (filters.size) {
+            0 -> Document()
+            1 -> filters.first()
+            else -> and(filters)
+        }
+
+        val iterable = collection.find(filter)
+            .sort(ascending("_id"))
+            .skip(offset ?: 0)
+            .let { if (limit != null) it.limit(limit) else it }
+
+        return iterable.map(::documentToPublicUser).toList()
+    }
+
+    private fun documentToPublicUser(document: Document): PublicUserResponse {
+        return PublicUserResponse(
+            id = document.getObjectId("_id").toHexString(),
+            fullName = document.getString("full_name"),
+            username = document.getString("username"),
+        )
+    }
 }
 
 private class MongoEventRepository(database: MongoDatabase) {
     private val collection: MongoCollection<Document> = database.getCollection("events")
 
     fun ensureIndexes() {
-        collection.createIndex(ascending("title"), IndexOptions().unique(true))
+        collection.createIndex(ascending("title"))
         collection.createIndex(ascending("title", "created_by"))
         collection.createIndex(ascending("created_by"))
+        collection.createIndex(ascending("category"))
+        collection.createIndex(ascending("price"))
+        collection.createIndex(ascending("location.city"))
+        collection.createIndex(ascending("started_at"))
     }
 
     fun createEvent(
@@ -599,9 +975,11 @@ private class MongoEventRepository(database: MongoDatabase) {
     ): String? {
         val document = Document()
             .append("title", title)
+            .append("category", "other")
+            .append("price", 0)
             .append("description", description)
             .append("location", Document("address", address))
-            .append("created_at", OffsetDateTime.now().toString())
+            .append("created_at", OffsetDateTime.now(ZoneOffset.UTC).toString())
             .append("created_by", createdBy)
             .append("started_at", startedAt)
             .append("finished_at", finishedAt)
@@ -614,33 +992,108 @@ private class MongoEventRepository(database: MongoDatabase) {
         }
     }
 
+    fun patchEvent(
+        id: ObjectId,
+        organizerId: String,
+        category: String?,
+        price: Int?,
+        city: String?,
+    ): Boolean {
+        val filter = and(eq("_id", id), eq("created_by", organizerId))
+        val setDoc = Document()
+        val unsetDoc = Document()
 
-    fun findEvents(title: String?, limit: Int?, offset: Int?): List<EventResponse> {
-        val filter: Bson = if (title.isNullOrBlank()) {
-            Document()
-        } else {
-            regex("title", ".*${Regex.escape(title)}.*", "i")
+        if (category != null) {
+            setDoc["category"] = category
+        }
+        if (price != null) {
+            setDoc["price"] = price
+        }
+        if (city != null) {
+            if (city.isBlank()) {
+                unsetDoc["location.city"] = ""
+            } else {
+                setDoc["location.city"] = city
+            }
+        }
+
+        val update = Document()
+        if (!setDoc.isEmpty()) {
+            update["\$set"] = setDoc
+        }
+        if (!unsetDoc.isEmpty()) {
+            update["\$unset"] = unsetDoc
+        }
+
+        val result = collection.updateOne(filter, update)
+        return result.matchedCount > 0
+    }
+
+    fun findEventById(id: ObjectId): EventResponse? {
+        val document = collection.find(eq("_id", id)).firstOrNull() ?: return null
+        return documentToEventResponse(document)
+    }
+
+    fun findEvents(query: EventSearchQuery): List<EventResponse> {
+        if (query.createdByUserId == "__no_such_user__") {
+            return emptyList()
+        }
+
+        val filters = mutableListOf<Bson>()
+        query.id?.let { filters += eq("_id", it) }
+        query.title?.let { filters += regex("title", ".*${Regex.escape(it)}.*", "i") }
+        query.category?.let { filters += eq("category", it) }
+        query.priceFrom?.let { filters += gte("price", it) }
+        query.priceTo?.let { filters += lte("price", it) }
+        query.city?.let { filters += eq("location.city", it) }
+        query.createdByUserId?.let { filters += eq("created_by", it) }
+        query.dateFrom?.let { filters += datePrefixFilter("\$started_at", "\$gte", it) }
+        query.dateTo?.let { filters += datePrefixFilter("\$started_at", "\$lte", it) }
+
+        val filter = when (filters.size) {
+            0 -> Document()
+            1 -> filters.first()
+            else -> and(filters)
         }
 
         val iterable = collection.find(filter)
             .sort(ascending("_id"))
-            .skip(offset ?: 0)
-            .let { if (limit != null) it.limit(limit) else it }
+            .skip(query.offset ?: 0)
+            .let { if (query.limit != null) it.limit(query.limit) else it }
 
-        return iterable.map { document ->
-            EventResponse(
-                id = document.getObjectId("_id").toHexString(),
-                title = document.getString("title"),
-                description = document.getString("description"),
-                location = EventLocationResponse(
-                    address = document.get("location", Document::class.java).getString("address")
-                ),
-                createdAt = document.getString("created_at"),
-                createdBy = document.getString("created_by"),
-                startedAt = document.getString("started_at"),
-                finishedAt = document.getString("finished_at"),
+        return iterable.map(::documentToEventResponse).toList()
+    }
+
+    private fun datePrefixFilter(fieldRef: String, operator: String, date: LocalDate): Bson {
+        val isoDate = date.toString()
+        return Document(
+            "\$expr",
+            Document(
+                operator,
+                listOf(
+                    Document("\$substrBytes", listOf(fieldRef, 0, 10)),
+                    isoDate,
+                )
             )
-        }.toList()
+        )
+    }
+
+    private fun documentToEventResponse(document: Document): EventResponse {
+        val locationDocument = document.get("location", Document::class.java) ?: Document()
+        return EventResponse(
+            id = document.getObjectId("_id").toHexString(),
+            title = document.getString("title"),
+            category = document.getString("category") ?: "other",
+            price = (document.get("price") as? Number)?.toInt() ?: 0,
+            description = document.getString("description") ?: "",
+            location = EventLocationResponse(
+                city = locationDocument.getString("city"),
+                address = locationDocument.getString("address") ?: "",
+            ),
+            createdAt = document.getString("created_at"),
+            createdBy = document.getString("created_by"),
+            startedAt = document.getString("started_at"),
+            finishedAt = document.getString("finished_at"),
+        )
     }
 }
-
