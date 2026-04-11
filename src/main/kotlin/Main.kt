@@ -3,6 +3,7 @@ import com.mongodb.client.model.Filters.and
 import com.mongodb.client.model.Filters.eq
 import com.mongodb.client.model.Filters.gte
 import com.mongodb.client.model.Filters.lte
+import com.mongodb.client.model.Filters.or
 import com.mongodb.client.model.Filters.regex
 import com.mongodb.client.model.IndexOptions
 import com.mongodb.client.model.Indexes.ascending
@@ -356,7 +357,7 @@ fun Application.module(config: AppConfig = loadConfig()) {
             }
 
             val user = userRepository.findByUsername(payload.username!!)
-            if (user == null || !BCrypt.checkpw(payload.password!!, user.passwordHash)) {
+            if (user == null || user.passwordHash == null || !BCrypt.checkpw(payload.password!!, user.passwordHash)) {
                 requestSid?.let {
                     if (sessionService.refreshIfExists(it)) {
                         setSessionCookie(call, it, config.sessionTtlSeconds)
@@ -577,7 +578,7 @@ fun Application.module(config: AppConfig = loadConfig()) {
             val createdByUserId = if (user == null) {
                 null
             } else {
-                userRepository.findByUsername(user)?.id ?: "__no_such_user__"
+                userRepository.findUserIdByUsername(user) ?: "__no_such_user__"
             }
 
             val events = eventRepository.findEvents(
@@ -778,8 +779,24 @@ private fun parseObjectId(value: String): ObjectId? = try {
     null
 }
 
+private fun documentIdToString(value: Any?): String? = when (value) {
+    is ObjectId -> value.toHexString()
+    is String -> value
+    else -> value?.toString()
+}
+
+private fun documentString(value: Any?): String = when (value) {
+    null -> ""
+    is String -> value
+    is java.util.Date -> value.toInstant().toString()
+    is Instant -> value.toString()
+    is OffsetDateTime -> value.toString()
+    is ObjectId -> value.toHexString()
+    else -> value.toString()
+}
+
 private data class SessionResult(val sid: String, val status: HttpStatusCode)
-private data class UserRecord(val id: String, val passwordHash: String)
+private data class UserRecord(val id: String, val passwordHash: String?)
 
 private class RedisSessionService(
     private val jedisPool: JedisPool,
@@ -907,17 +924,27 @@ private class MongoUserRepository(database: MongoDatabase) {
     fun findByUsername(username: String): UserRecord? {
         val doc = collection.find(eq("username", username)).firstOrNull() ?: return null
         return UserRecord(
-            id = doc.getObjectId("_id").toHexString(),
+            id = documentIdToString(doc.get("_id")) ?: return null,
             passwordHash = doc.getString("password_hash")
         )
     }
 
-    fun findPublicById(id: ObjectId): PublicUserResponse? {
-        val doc = collection.find(eq("_id", id)).firstOrNull() ?: return null
-        return documentToPublicUser(doc)
+    fun findUserIdByUsername(username: String): String? {
+        val doc = collection.find(eq("username", username)).firstOrNull() ?: return null
+        return documentIdToString(doc.get("_id"))
     }
 
-    fun existsById(id: ObjectId): Boolean = collection.find(eq("_id", id)).limit(1).firstOrNull() != null
+    fun findPublicById(id: ObjectId): PublicUserResponse? {
+        val doc = collection.find(eq("_id", id)).firstOrNull() ?: return null
+        return PublicUserResponse(
+            id = documentIdToString(doc.get("_id")) ?: return null,
+            fullName = documentString(doc.get("full_name")),
+            username = documentString(doc.get("username")),
+        )
+    }
+
+    fun existsById(id: ObjectId): Boolean =
+        collection.find(eq("_id", id)).limit(1).firstOrNull() != null
 
     fun findUsers(id: ObjectId?, name: String?, limit: Int?, offset: Int?): List<PublicUserResponse> {
         val filters = mutableListOf<Bson>()
@@ -939,15 +966,13 @@ private class MongoUserRepository(database: MongoDatabase) {
             .skip(offset ?: 0)
             .let { if (limit != null) it.limit(limit) else it }
 
-        return iterable.map(::documentToPublicUser).toList()
-    }
-
-    private fun documentToPublicUser(document: Document): PublicUserResponse {
-        return PublicUserResponse(
-            id = document.getObjectId("_id").toHexString(),
-            fullName = document.getString("full_name"),
-            username = document.getString("username"),
-        )
+        return iterable.map {
+            PublicUserResponse(
+                id = documentIdToString(it.get("_id")) ?: "",
+                fullName = documentString(it.get("full_name")),
+                username = documentString(it.get("username")),
+            )
+        }.toList()
     }
 }
 
@@ -998,7 +1023,11 @@ private class MongoEventRepository(database: MongoDatabase) {
         price: Int?,
         city: String?,
     ): Boolean {
-        val filter = and(eq("_id", id), eq("created_by", organizerId))
+        val organizerFilter = parseObjectId(organizerId)?.let { organizerObjectId ->
+            or(eq("created_by", organizerId), eq("created_by", organizerObjectId))
+        } ?: eq("created_by", organizerId)
+
+        val filter = and(eq("_id", id), organizerFilter)
         val setDoc = Document()
         val unsetDoc = Document()
 
@@ -1045,9 +1074,12 @@ private class MongoEventRepository(database: MongoDatabase) {
         query.priceFrom?.let { filters += gte("price", it) }
         query.priceTo?.let { filters += lte("price", it) }
         query.city?.let { filters += eq("location.city", it) }
-        query.createdByUserId?.let { filters += eq("created_by", it) }
-        query.dateFrom?.let { filters += datePrefixFilter("\$started_at", "\$gte", it) }
-        query.dateTo?.let { filters += datePrefixFilter("\$started_at", "\$lte", it) }
+        query.createdByUserId?.let { userId ->
+            val createdByFilter = parseObjectId(userId)?.let { objectId ->
+                or(eq("created_by", userId), eq("created_by", objectId))
+            } ?: eq("created_by", userId)
+            filters += createdByFilter
+        }
 
         val filter = when (filters.size) {
             0 -> Document()
@@ -1055,44 +1087,60 @@ private class MongoEventRepository(database: MongoDatabase) {
             else -> and(filters)
         }
 
-        val iterable = collection.find(filter)
+        val events = collection.find(filter)
             .sort(ascending("_id"))
-            .skip(query.offset ?: 0)
-            .let { if (query.limit != null) it.limit(query.limit) else it }
+            .map(::documentToEventResponse)
+            .toList()
+            .filter { eventMatchesDateRange(it, query.dateFrom, query.dateTo) }
 
-        return iterable.map(::documentToEventResponse).toList()
+        return events
+            .drop(query.offset ?: 0)
+            .let { if (query.limit != null) it.take(query.limit) else it }
     }
 
-    private fun datePrefixFilter(fieldRef: String, operator: String, date: LocalDate): Bson {
-        val isoDate = date.toString()
-        return Document(
-            "\$expr",
-            Document(
-                operator,
-                listOf(
-                    Document("\$substrBytes", listOf(fieldRef, 0, 10)),
-                    isoDate,
-                )
-            )
-        )
+    private fun eventMatchesDateRange(event: EventResponse, dateFrom: LocalDate?, dateTo: LocalDate?): Boolean {
+        if (dateFrom == null && dateTo == null) return true
+
+        val eventDate = parseStartedAtToLocalDate(event.startedAt) ?: return false
+        if (dateFrom != null && eventDate.isBefore(dateFrom)) return false
+        if (dateTo != null && eventDate.isAfter(dateTo)) return false
+        return true
+    }
+
+    private fun parseStartedAtToLocalDate(value: String): LocalDate? {
+        if (value.isBlank()) return null
+
+        return try {
+            OffsetDateTime.parse(value).toLocalDate()
+        } catch (_: Exception) {
+            try {
+                Instant.parse(value).atOffset(ZoneOffset.UTC).toLocalDate()
+            } catch (_: Exception) {
+                try {
+                    LocalDate.parse(value.substring(0, 10))
+                } catch (_: Exception) {
+                    null
+                }
+            }
+        }
     }
 
     private fun documentToEventResponse(document: Document): EventResponse {
         val locationDocument = document.get("location", Document::class.java) ?: Document()
         return EventResponse(
-            id = document.getObjectId("_id").toHexString(),
-            title = document.getString("title"),
-            category = document.getString("category") ?: "other",
+            id = documentIdToString(document.get("_id")) ?: "",
+            title = documentString(document.get("title")),
+            category = documentString(document.get("category")).ifBlank { "other" },
             price = (document.get("price") as? Number)?.toInt() ?: 0,
-            description = document.getString("description") ?: "",
+            description = documentString(document.get("description")),
             location = EventLocationResponse(
-                city = locationDocument.getString("city"),
-                address = locationDocument.getString("address") ?: "",
+                city = locationDocument.get("city")?.let { documentString(it) }?.ifBlank { null },
+                address = documentString(locationDocument.get("address")),
             ),
-            createdAt = document.getString("created_at"),
-            createdBy = document.getString("created_by"),
-            startedAt = document.getString("started_at"),
-            finishedAt = document.getString("finished_at"),
+            createdAt = documentString(document.get("created_at")),
+            createdBy = documentIdToString(document.get("created_by")) ?: "",
+            startedAt = documentString(document.get("started_at")),
+            finishedAt = documentString(document.get("finished_at")),
         )
     }
 }
