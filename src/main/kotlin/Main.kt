@@ -447,14 +447,13 @@ fun Application.module(config: AppConfig = loadConfig()) {
             }
 
             val eventIdRaw = call.parameters["id"]
-            val eventId = if (eventIdRaw == null) {
-                call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"id\" field"))
+            val eventId = eventIdRaw?.let { parseObjectId(it) }
+            if (eventId == null) {
+                call.respond(
+                    HttpStatusCode.NotFound,
+                    ErrorResponse("Not found. Be sure that event exists and you are the organizer")
+                )
                 return@patch
-            } else {
-                parseObjectId(eventIdRaw) ?: run {
-                    call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"id\" field"))
-                    return@patch
-                }
             }
 
             val payload = runCatching { call.receive<EventPatchRequest>() }.getOrNull()
