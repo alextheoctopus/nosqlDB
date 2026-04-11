@@ -302,9 +302,101 @@ fun Application.module(config: AppConfig = loadConfig()) {
                 return@get
             }
 
+            val title = call.request.queryParameters["title"]
+            val idRaw = call.request.queryParameters["id"]
+            val category = call.request.queryParameters["category"]
+            val priceFromRaw = call.request.queryParameters["price_from"]
+            val priceToRaw = call.request.queryParameters["price_to"]
+            val city = call.request.queryParameters["city"]
+            val dateFromRaw = call.request.queryParameters["date_from"]
+            val dateToRaw = call.request.queryParameters["date_to"]
+            val limitRaw = call.request.queryParameters["limit"]
+            val offsetRaw = call.request.queryParameters["offset"]
+
+            if (title != null && title.isBlank()) {
+                call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"title\" field"))
+                return@get
+            }
+            if (city != null && city.isBlank()) {
+                call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"city\" field"))
+                return@get
+            }
+            if (category != null && category !in EVENT_CATEGORIES) {
+                call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"category\" field"))
+                return@get
+            }
+
+            val id = if (idRaw == null) {
+                null
+            } else {
+                parseObjectId(idRaw) ?: run {
+                    call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"id\" field"))
+                    return@get
+                }
+            }
+
+            val priceFrom = parseUIntParameter(priceFromRaw)
+            if (priceFromRaw != null && priceFrom == null) {
+                call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"price_from\" field"))
+                return@get
+            }
+
+            val priceTo = parseUIntParameter(priceToRaw)
+            if (priceToRaw != null && priceTo == null) {
+                call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"price_to\" field"))
+                return@get
+            }
+
+            if (priceFrom != null && priceTo != null && priceTo < priceFrom) {
+                call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"price_to\" field"))
+                return@get
+            }
+
+            val dateFrom = parseBasicDate(dateFromRaw)
+            if (dateFromRaw != null && dateFrom == null) {
+                call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"date_from\" field"))
+                return@get
+            }
+
+            val dateTo = parseBasicDate(dateToRaw)
+            if (dateToRaw != null && dateTo == null) {
+                call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"date_to\" field"))
+                return@get
+            }
+
+            if (dateFrom != null && dateTo != null && dateTo.isBefore(dateFrom)) {
+                call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"date_to\" field"))
+                return@get
+            }
+
+            val limit = parseUIntParameter(limitRaw)
+            if (limitRaw != null && limit == null) {
+                call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"limit\" field"))
+                return@get
+            }
+
+            val offset = parseUIntParameter(offsetRaw)
+            if (offsetRaw != null && offset == null) {
+                call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"offset\" field"))
+                return@get
+            }
+
             val events = eventRepository.findEvents(
-                EventSearchQuery(createdByUserId = userId.toHexString())
+                EventSearchQuery(
+                    id = id,
+                    title = title,
+                    category = category,
+                    priceFrom = priceFrom,
+                    priceTo = priceTo,
+                    city = city,
+                    dateFrom = dateFrom,
+                    dateTo = dateTo,
+                    createdByUserId = userId.toHexString(),
+                    limit = limit,
+                    offset = offset,
+                )
             )
+
             call.respond(EventsListResponse(events, events.size))
         }
 
