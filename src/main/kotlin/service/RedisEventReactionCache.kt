@@ -1,6 +1,3 @@
-import kotlinx.serialization.decodeFromString
-import kotlinx.serialization.encodeToString
-import kotlinx.serialization.json.Json
 import redis.clients.jedis.JedisPool
 import java.security.MessageDigest
 
@@ -8,32 +5,37 @@ class RedisEventReactionCache(
     private val jedisPool: JedisPool,
     private val ttlSeconds: Long,
 ) {
-    private val json = Json {
-        ignoreUnknownKeys = true
-        explicitNulls = false
-    }
-
     fun get(title: String): ReactionsResponse? {
-        val value = jedisPool.resource.use { jedis ->
-            jedis.get(cacheKey(title))
-        } ?: return null
+        val values = jedisPool.resource.use { jedis ->
+            jedis.hgetAll(cacheKey(title))
+        }
 
-        return runCatching {
-            json.decodeFromString<ReactionsResponse>(value)
-        }.getOrNull()
+        if (values.isEmpty()) {
+            return null
+        }
+
+        return ReactionsResponse(
+            likes = values["likes"]?.toIntOrNull() ?: 0,
+            dislikes = values["dislikes"]?.toIntOrNull() ?: 0,
+        )
     }
 
     fun put(title: String, reactions: ReactionsResponse) {
+        val key = cacheKey(title)
+
         jedisPool.resource.use { jedis ->
-            jedis.setex(cacheKey(title), ttlSeconds, json.encodeToString(reactions))
+            jedis.hset(
+                key,
+                mapOf(
+                    "likes" to reactions.likes.toString(),
+                    "dislikes" to reactions.dislikes.toString(),
+                )
+            )
+            jedis.expire(key, ttlSeconds)
         }
     }
 
-    fun invalidate(title: String) {
-        jedisPool.resource.use { jedis ->
-            jedis.del(cacheKey(title))
-        }
-    }
+    
 
     private fun cacheKey(title: String): String =
         "event:${md5(title)}:reactions"
