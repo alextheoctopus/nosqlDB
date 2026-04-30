@@ -14,7 +14,10 @@ class EventReactionService(
             likeValue = likeValue,
         )
 
-        reactionCache.invalidate(eventTitle)
+        val eventIds = eventRepository.findEventIdsByExactTitle(eventTitle)
+        val result = reactionRepository.countReactions(eventIds)
+        reactionCache.put(eventTitle, result.reactions)
+
         return true
     }
 
