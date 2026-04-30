@@ -51,6 +51,14 @@ fun createCassandraSession(config: AppConfig): CqlSession {
 private fun buildCassandraSession(config: AppConfig, keyspace: String?): CqlSession {
     val builder = CqlSession.builder()
         .withLocalDatacenter("dc1")
+        .withConfigLoader(
+            com.datastax.oss.driver.api.core.config.DriverConfigLoader.programmaticBuilder()
+                .withDuration(
+                    com.datastax.oss.driver.api.core.config.DefaultDriverOption.REQUEST_TIMEOUT,
+                    java.time.Duration.ofSeconds(10)
+                )
+                .build()
+        )
 
     config.cassandraHosts.forEach { host ->
         builder.addContactPoint(InetSocketAddress(host, config.cassandraPort))

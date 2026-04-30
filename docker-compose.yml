@@ -137,8 +137,10 @@ services:
       - CASSANDRA_RACK=rack1
       - CASSANDRA_ENDPOINT_SNITCH=GossipingPropertyFileSnitch
       - CASSANDRA_SEEDS=cassandra-dc1-node1
-    mem_limit: 4g
-    mem_reservation: 3g
+      - MAX_HEAP_SIZE=512M
+      - HEAP_NEWSIZE=128M
+    mem_limit: 2g
+    mem_reservation: 1g
     ports:
       - "${CASSANDRA_PORT}:${CASSANDRA_PORT}"
     volumes:
