@@ -1,45 +1,51 @@
-import org.bson.types.ObjectId
+import redis.clients.jedis.JedisPool
+import java.security.MessageDigest
 
-class EventReactionService(
-    private val eventRepository: MongoEventRepository,
-    private val reactionRepository: CassandraEventReactionRepository,
-    private val reactionCache: RedisEventReactionCache,
+class RedisEventReactionCache(
+    private val jedisPool: JedisPool,
+    private val ttlSeconds: Long,
 ) {
-    fun setReaction(eventId: ObjectId, userId: String, likeValue: Int): Boolean {
-        val eventTitle = eventRepository.findEventTitleById(eventId) ?: return false
+    fun get(title: String): ReactionsResponse? {
+        val values = jedisPool.resource.use { jedis ->
+            jedis.hgetAll(cacheKey(title))
+        }
 
-        reactionRepository.upsertReaction(
-            eventId = eventId.toHexString(),
-            userId = userId,
-            likeValue = likeValue,
+        if (values.isEmpty()) {
+            return null
+        }
+
+        return ReactionsResponse(
+            likes = values["likes"]?.toIntOrNull() ?: 0,
+            dislikes = values["dislikes"]?.toIntOrNull() ?: 0,
         )
-
-        val eventIds = eventRepository.findEventIdsByExactTitle(eventTitle)
-        val result = reactionRepository.countReactions(eventIds)
-        reactionCache.put(eventTitle, result.reactions)
-
-        return true
     }
 
-    fun withReactions(event: EventResponse): EventResponse =
-        event.copy(reactions = getReactions(event.title))
+    fun put(title: String, reactions: ReactionsResponse) {
+        val key = cacheKey(title)
 
-    fun withReactions(events: List<EventResponse>): List<EventResponse> =
-        events.map { event -> withReactions(event) }
-
-    private fun getReactions(title: String): ReactionsResponse {
-        val cached = reactionCache.get(title)
-        if (cached != null) {
-            return cached
+        jedisPool.resource.use { jedis ->
+            jedis.hset(
+                key,
+                mapOf(
+                    "likes" to reactions.likes.toString(),
+                    "dislikes" to reactions.dislikes.toString(),
+                )
+            )
+            jedis.expire(key, ttlSeconds)
         }
+    }
 
-        val eventIds = eventRepository.findEventIdsByExactTitle(title)
-        val result = reactionRepository.countReactions(eventIds)
-
-        if (result.hasRows) {
-            reactionCache.put(title, result.reactions)
+    fun invalidate(title: String) {
+        jedisPool.resource.use { jedis ->
+            jedis.del(cacheKey(title))
         }
+    }
 
-        return result.reactions
+    private fun cacheKey(title: String): String =
+        "event:${md5(title)}:reactions"
+
+    private fun md5(value: String): String {
+        val bytes = MessageDigest.getInstance("MD5").digest(value.toByteArray(Charsets.UTF_8))
+        return bytes.joinToString(separator = "") { byte -> "%02x".format(byte) }
     }
 }
