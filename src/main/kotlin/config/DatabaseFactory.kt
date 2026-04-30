@@ -4,6 +4,8 @@ import redis.clients.jedis.JedisPoolConfig
 import com.datastax.oss.driver.api.core.CqlIdentifier
 import com.datastax.oss.driver.api.core.CqlSession
 import java.net.InetSocketAddress
+import com.datastax.oss.driver.api.core.session.SessionBuilder
+import com.datastax.oss.driver.api.core.CqlSessionBuilder
 fun createJedisPool(config: AppConfig): JedisPool {
     val poolConfig = JedisPoolConfig().apply {
         maxTotal = 8
@@ -62,7 +64,7 @@ private fun buildCassandraSession(config: AppConfig, keyspace: String?): CqlSess
         builder.withKeyspace(CqlIdentifier.fromCql(keyspace))
     }
 
-    return builder.build()
+    return buildWithRetry(builder)
 }
 
 private fun createEventReactionsTable(session: CqlSession) {
@@ -91,4 +93,19 @@ private fun createEventReactionsTable(session: CqlSession) {
         ON event_reactions (created_by)
         """.trimIndent()
     )
+}
+private fun buildWithRetry(builder: CqlSessionBuilder): CqlSession {
+    var lastError: Exception? = null
+
+    repeat(30) { attempt ->
+        try {
+            return builder.build()
+        } catch (e: Exception) {
+            lastError = e
+            println("Cassandra is not ready yet, retry ${attempt + 1}/30")
+            Thread.sleep(2_000)
+        }
+    }
+
+    throw lastError ?: error("Failed to connect to Cassandra")
 }
