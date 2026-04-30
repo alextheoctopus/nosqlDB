@@ -15,13 +15,29 @@ fun Application.module(config: AppConfig = loadConfig()) {
     val mongoClient = createMongoClient(config)
     val mongoDatabase = mongoClient.getDatabase(config.mongoDatabase)
     val userRepository = MongoUserRepository(mongoDatabase)
+
     val eventRepository = MongoEventRepository(mongoDatabase)
     userRepository.ensureIndexes()
     eventRepository.ensureIndexes()
 
+    val cassandraSession = createCassandraSession(config)
+    val reactionRepository = CassandraEventReactionRepository(
+        session = cassandraSession,
+        consistency = config.cassandraConsistency,
+    )
+    val reactionCache = RedisEventReactionCache(
+        jedisPool = jedisPool,
+        ttlSeconds = config.likeTtlSeconds,
+    )
+    val reactionService = EventReactionService(
+        eventRepository = eventRepository,
+        reactionRepository = reactionRepository,
+        reactionCache = reactionCache,
+    )
     monitor.subscribe(ApplicationStopped) {
         jedisPool.close()
         mongoClient.close()
+        cassandraSession.close()
     }
 
     install(ContentNegotiation) {
@@ -230,7 +246,7 @@ fun Application.module(config: AppConfig = loadConfig()) {
                 call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"offset\" field"))
                 return@get
             }
-
+            val includeReactions = shouldIncludeReactions(call)
             val events = eventRepository.findEvents(
                 EventSearchQuery(
                     id = id,
@@ -247,7 +263,13 @@ fun Application.module(config: AppConfig = loadConfig()) {
                 )
             )
 
-            call.respond(EventsListResponse(events, events.size))
+            val responseEvents = if (includeReactions) {
+                reactionService.withReactions(events)
+            } else {
+                events
+            }
+
+            call.respond(EventsListResponse(responseEvents, responseEvents.size))
         }
 
         get("/users/{id}") {
@@ -373,6 +395,28 @@ fun Application.module(config: AppConfig = loadConfig()) {
             }
 
             call.respond(HttpStatusCode.Created, CreateEventResponse(eventId))
+        }
+
+        post("/events/{event_id}/like") {
+            handleEventReaction(
+                call = call,
+                sessionService = sessionService,
+                ttlSeconds = config.sessionTtlSeconds,
+                reactionService = reactionService,
+                likeValue = 1,
+                expireUnauthorizedCookie = false,
+            )
+        }
+
+        post("/events/{event_id}/dislike") {
+            handleEventReaction(
+                call = call,
+                sessionService = sessionService,
+                ttlSeconds = config.sessionTtlSeconds,
+                reactionService = reactionService,
+                likeValue = -1,
+                expireUnauthorizedCookie = true,
+            )
         }
 
         patch("/events/{id}") {
@@ -522,7 +566,7 @@ fun Application.module(config: AppConfig = loadConfig()) {
             } else {
                 userRepository.findUserIdByUsername(user) ?: "__no_such_user__"
             }
-
+            val includeReactions = shouldIncludeReactions(call)
             val events = eventRepository.findEvents(
                 EventSearchQuery(
                     id = id,
@@ -539,7 +583,13 @@ fun Application.module(config: AppConfig = loadConfig()) {
                 )
             )
 
-            call.respond(EventsListResponse(events, events.size))
+            val responseEvents = if (includeReactions) {
+                reactionService.withReactions(events)
+            } else {
+                events
+            }
+
+            call.respond(EventsListResponse(responseEvents, responseEvents.size))
         }
 
         get("/events/{id}") {
@@ -561,8 +611,62 @@ fun Application.module(config: AppConfig = loadConfig()) {
                 call.respond(HttpStatusCode.NotFound, ErrorResponse("Not found"))
                 return@get
             }
+            val includeReactions = shouldIncludeReactions(call)
+            val responseEvent = if (includeReactions) {
+                reactionService.withReactions(event)
+            } else {
+                event
+            }
 
-            call.respond(event)
+            call.respond(responseEvent)
         }
     }
+}
+private fun shouldIncludeReactions(call: ApplicationCall): Boolean =
+    call.request.queryParameters.getAll("include")?.contains("reactions") == true
+
+private suspend fun handleEventReaction(
+    call: ApplicationCall,
+    sessionService: RedisSessionService,
+    ttlSeconds: Long,
+    reactionService: EventReactionService,
+    likeValue: Int,
+    expireUnauthorizedCookie: Boolean,
+) {
+    val sid = extractValidSid(call.request)
+    if (sid == null || !sessionService.refreshIfExists(sid)) {
+        if (expireUnauthorizedCookie) {
+            expireSessionCookie(call)
+        }
+        call.respond(HttpStatusCode.Unauthorized)
+        return
+    }
+
+    setSessionCookie(call, sid, ttlSeconds)
+
+    val userId = sessionService.getUserId(sid)
+    if (userId == null) {
+        call.respond(HttpStatusCode.Unauthorized)
+        return
+    }
+
+    val eventIdRaw = call.parameters["event_id"]
+    val eventId = eventIdRaw?.let { parseObjectId(it) }
+    if (eventId == null) {
+        call.respond(HttpStatusCode.NotFound, ErrorResponse("Event not found"))
+        return
+    }
+
+    val updated = reactionService.setReaction(
+        eventId = eventId,
+        userId = userId,
+        likeValue = likeValue,
+    )
+
+    if (!updated) {
+        call.respond(HttpStatusCode.NotFound, ErrorResponse("Event not found"))
+        return
+    }
+
+    call.respond(HttpStatusCode.NoContent)
 }

@@ -20,14 +20,15 @@ data class EventLocationResponse(
 data class EventResponse(
     val id: String,
     val title: String,
-    val description: String,
-    val location: EventLocationResponse,
     val category: String,
     val price: Int,
+    val description: String,
+    val location: EventLocationResponse,
     @SerialName("created_at") val createdAt: String,
     @SerialName("created_by") val createdBy: String,
     @SerialName("started_at") val startedAt: String,
     @SerialName("finished_at") val finishedAt: String,
+    val reactions: ReactionsResponse? = null,
 )
 
 @Serializable
@@ -45,4 +46,9 @@ data class PublicUserResponse(
 data class UsersListResponse(
     val users: List<PublicUserResponse>,
     val count: Int,
+)
+@Serializable
+data class ReactionsResponse(
+    val likes: Int,
+    val dislikes: Int,
 )

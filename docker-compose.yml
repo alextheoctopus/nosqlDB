@@ -6,6 +6,8 @@ services:
     ports:
       - "${APP_PORT}:${APP_PORT}"
     depends_on:
+      cassandra-dc1-node1:
+        condition: service_healthy
       redis:
         condition: service_started
       mongos:
@@ -125,6 +127,33 @@ services:
       - ./mongo-cluster-init.sh:/scripts/mongo-cluster-init.sh:ro
     entrypoint: [ "bash", "/scripts/mongo-cluster-init.sh" ]
     restart: "no"
+
+  cassandra-dc1-node1:
+    image: cassandra:latest
+    container_name: cassandra-dc1-node1
+    environment:
+      - CASSANDRA_CLUSTER_NAME=IoTCLuster
+      - CASSANDRA_DC=dc1
+      - CASSANDRA_RACK=rack1
+      - CASSANDRA_ENDPOINT_SNITCH=GossipingPropertyFileSnitch
+      - CASSANDRA_SEEDS=cassandra-dc1-node1
+    mem_limit: 4g
+    mem_reservation: 3g
+    ports:
+      - "${CASSANDRA_PORT}:${CASSANDRA_PORT}"
+    volumes:
+      - ./volume/dc1-node1:/var/lib/cassandra/data
+    networks:
+      - cassandra-net
+    healthcheck:
+      test: ["CMD", "nodetool", "status"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+networks:
+  cassandra-net:
+    driver: bridge
 
 volumes:
   configsvr1_data:
