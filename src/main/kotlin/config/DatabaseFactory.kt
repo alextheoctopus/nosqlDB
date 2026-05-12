@@ -45,7 +45,32 @@ fun createCassandraSession(config: AppConfig): CqlSession {
 
     val session = buildCassandraSession(config, keyspace = config.cassandraKeyspace)
     createEventReactionsTable(session)
+    createEventReviewsTable(session)
     return session
+}
+
+private fun createEventReviewsTable(session: CqlSession) {
+    session.execute(
+        """
+        CREATE TABLE IF NOT EXISTS event_reviews (
+            event_id text,
+            created_by text,
+            id uuid,
+            rating tinyint,
+            comment text,
+            created_at timestamp,
+            updated_at timestamp,
+            PRIMARY KEY ((event_id), created_by)
+        )
+        """.trimIndent()
+    )
+
+    session.execute(
+        """
+        CREATE INDEX IF NOT EXISTS event_reviews_id_idx
+        ON event_reviews (id)
+        """.trimIndent()
+    )
 }
 
 private fun buildCassandraSession(config: AppConfig, keyspace: String?): CqlSession {

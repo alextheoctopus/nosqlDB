@@ -30,3 +30,15 @@ data class EventPatchRequest(
     val price: Int? = null,
     val city: String? = null,
 )
+
+@Serializable
+data class ReviewCreateRequest(
+    val comment: String? = null,
+    val rating: Int? = null,
+)
+
+@Serializable
+data class ReviewPatchRequest(
+    val comment: String? = null,
+    val rating: Int? = null,
+)

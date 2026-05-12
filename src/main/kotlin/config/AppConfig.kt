@@ -5,6 +5,7 @@ data class AppConfig(
     val host: String,
     val sessionTtlSeconds: Long,
     val likeTtlSeconds: Long,
+    val eventReviewsTtlSeconds: Long,
 
     val redisHost: String,
     val redisPort: Int,

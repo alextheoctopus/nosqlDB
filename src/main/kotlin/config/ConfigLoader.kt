@@ -5,7 +5,7 @@ fun loadConfig(): AppConfig = AppConfig(
     host = System.getenv("APP_HOST").trim().trim('"'),
     sessionTtlSeconds = System.getenv("APP_USER_SESSION_TTL").trim().substringBefore("#").trim().toLong(),
     likeTtlSeconds = System.getenv("APP_LIKE_TTL").trim().substringBefore("#").trim().toLong(),
-
+    eventReviewsTtlSeconds = System.getenv("APP_EVENT_REVIEWS_TTL").trim().substringBefore("#").trim().toLong(),
 
     redisHost = System.getenv("REDIS_HOST").trim(),
     redisPort = System.getenv("REDIS_PORT").trim().toInt(),

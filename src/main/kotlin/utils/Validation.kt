@@ -3,6 +3,8 @@ import java.time.LocalDate
 import java.time.OffsetDateTime
 import java.time.format.DateTimeFormatter
 import java.time.format.DateTimeParseException
+import java.util.UUID
+
 val EVENT_CATEGORIES = setOf("meetup", "concert", "exhibition", "party", "other")
 val BASIC_DATE_FORMATTER: DateTimeFormatter = DateTimeFormatter.BASIC_ISO_DATE
 
@@ -73,3 +75,23 @@ fun parseObjectId(value: String): ObjectId? = try {
 } catch (_: IllegalArgumentException) {
     null
 }
+
+fun validateReviewCreateRequest(request: ReviewCreateRequest): String? {
+    if (request.comment == null || request.comment.length > 300) return "comment"
+    if (request.rating == null || request.rating !in 1..5) return "rating"
+    return null
+}
+
+fun validateReviewPatchRequest(request: ReviewPatchRequest): String? {
+    if (request.comment == null && request.rating == null) return "body"
+    if (request.comment != null && request.comment.length > 300) return "comment"
+    if (request.rating != null && request.rating !in 1..5) return "rating"
+    return null
+}
+
+fun parseUuid(value: String): UUID? = try {
+    UUID.fromString(value)
+} catch (_: IllegalArgumentException) {
+    null
+}
+
