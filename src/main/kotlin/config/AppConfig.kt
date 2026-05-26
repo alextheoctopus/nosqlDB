@@ -12,3 +12,4 @@ data class AppConfig(
     val mongoHost: String,
     val mongoPort: Int,
 )
+

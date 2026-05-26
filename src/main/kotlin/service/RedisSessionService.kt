@@ -55,7 +55,7 @@ class RedisSessionService(
 
     fun getUserId(sid: String): String? {
         return jedisPool.resource.use { jedis ->
-            jedis.hget(sessionKey(sid), "user_id")?.ifBlank { null }
+            jedis.hget(sessionKey(sid), "user_id")
         }
     }
 

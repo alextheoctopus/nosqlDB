@@ -8,8 +8,8 @@ fun loadConfig(): AppConfig = AppConfig(
     redisDb = System.getenv("REDIS_DB").trim().toInt(),
 
     mongoDatabase = System.getenv("MONGODB_DATABASE").trim().trim('"'),
-    mongoUser = System.getenv("MONGODB_USER").trim(),
-    mongoPassword = System.getenv("MONGODB_PASSWORD").trim(),
+    mongoUser = System.getenv("MONGODB_USER")?.trim()?.ifBlank { null },
+    mongoPassword = System.getenv("MONGODB_PASSWORD")?.trim()?.ifBlank { null },
     mongoHost = System.getenv("MONGODB_HOST").trim(),
-    mongoPort = System.getenv("MONGODB_PORT").trim().toInt(),
+    mongoPort = System.getenv("MONGODB_PORT").trim().toInt()
 )

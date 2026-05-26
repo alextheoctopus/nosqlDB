@@ -9,7 +9,7 @@ fun createJedisPool(config: AppConfig): JedisPool {
         minIdle = 0
     }
 
-    return if (config.redisPassword != null) {
+    return if (!config.redisPassword.isNullOrBlank()) {
         JedisPool(poolConfig, config.redisHost, config.redisPort, 2_000, config.redisPassword, config.redisDb)
     } else {
         JedisPool(poolConfig, config.redisHost, config.redisPort, 2_000, null, config.redisDb)
