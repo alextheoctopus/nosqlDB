@@ -6,6 +6,8 @@ services:
     ports:
       - "${APP_PORT}:${APP_PORT}"
     depends_on:
+      cassandra-init:
+        condition: service_completed_successfully
       cassandra-dc1-node1:
         condition: service_healthy
       redis:
@@ -17,6 +19,21 @@ services:
     networks:
       - default
       - cassandra-net
+
+  cassandra-init:
+    image: cassandra:5.0
+    env_file:
+      - .env.local
+    depends_on:
+      cassandra-dc1-node1:
+        condition: service_healthy
+    volumes:
+      - ./scripts/cassandra-init.sh:/scripts/cassandra-init.sh:ro
+    entrypoint: [ "bash", "/scripts/cassandra-init.sh" ]
+    restart: "no"
+    networks:
+      - cassandra-net
+
   redis:
     image: redis:7-alpine
     ports:
