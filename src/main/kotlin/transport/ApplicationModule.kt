@@ -8,6 +8,7 @@ import io.ktor.server.routing.*
 import org.mindrot.jbcrypt.BCrypt
 import java.time.format.DateTimeFormatter
 import kotlinx.serialization.json.Json
+
 fun Application.module(config: AppConfig = loadConfig()) {
     val jedisPool = createJedisPool(config)
     val sessionService = RedisSessionService(jedisPool, config.sessionTtlSeconds)
@@ -21,6 +22,8 @@ fun Application.module(config: AppConfig = loadConfig()) {
     eventRepository.ensureIndexes()
 
     val cassandraSession = createCassandraSession(config)
+
+
     val reactionRepository = CassandraEventReactionRepository(
         session = cassandraSession,
         consistency = config.cassandraConsistency,
@@ -34,6 +37,23 @@ fun Application.module(config: AppConfig = loadConfig()) {
         reactionRepository = reactionRepository,
         reactionCache = reactionCache,
     )
+
+    val reviewRepository = CassandraEventReviewRepository(
+        session = cassandraSession,
+        consistency = config.cassandraConsistency,
+    )
+
+    val reviewCache = RedisEventReviewCache(
+        jedisPool = jedisPool,
+        ttlSeconds = config.eventReviewsTtlSeconds,
+    )
+
+    val reviewService = EventReviewService(
+        eventRepository = eventRepository,
+        reviewRepository = reviewRepository,
+        reviewCache = reviewCache,
+    )
+
     monitor.subscribe(ApplicationStopped) {
         jedisPool.close()
         mongoClient.close()
@@ -247,6 +267,7 @@ fun Application.module(config: AppConfig = loadConfig()) {
                 return@get
             }
             val includeReactions = shouldIncludeReactions(call)
+            val includeReviews = shouldIncludeReviews(call)
             val events = eventRepository.findEvents(
                 EventSearchQuery(
                     id = id,
@@ -263,11 +284,13 @@ fun Application.module(config: AppConfig = loadConfig()) {
                 )
             )
 
-            val responseEvents = if (includeReactions) {
-                reactionService.withReactions(events)
-            } else {
-                events
-            }
+            val responseEvents = applyEventIncludes(
+                events = events,
+                includeReactions = includeReactions,
+                includeReviews = includeReviews,
+                reactionService = reactionService,
+                reviewService = reviewService,
+            )
 
             call.respond(EventsListResponse(responseEvents, responseEvents.size))
         }
@@ -567,6 +590,8 @@ fun Application.module(config: AppConfig = loadConfig()) {
                 userRepository.findUserIdByUsername(user) ?: "__no_such_user__"
             }
             val includeReactions = shouldIncludeReactions(call)
+            val includeReviews = shouldIncludeReviews(call)
+
             val events = eventRepository.findEvents(
                 EventSearchQuery(
                     id = id,
@@ -583,11 +608,13 @@ fun Application.module(config: AppConfig = loadConfig()) {
                 )
             )
 
-            val responseEvents = if (includeReactions) {
-                reactionService.withReactions(events)
-            } else {
-                events
-            }
+            val responseEvents = applyEventIncludes(
+                events = events,
+                includeReactions = includeReactions,
+                includeReviews = includeReviews,
+                reactionService = reactionService,
+                reviewService = reviewService,
+            )
 
             call.respond(EventsListResponse(responseEvents, responseEvents.size))
         }
@@ -611,19 +638,265 @@ fun Application.module(config: AppConfig = loadConfig()) {
                 call.respond(HttpStatusCode.NotFound, ErrorResponse("Not found"))
                 return@get
             }
+
             val includeReactions = shouldIncludeReactions(call)
-            val responseEvent = if (includeReactions) {
-                reactionService.withReactions(event)
-            } else {
-                event
-            }
+            val includeReviews = shouldIncludeReviews(call)
+
+            val responseEvent = applyEventIncludes(
+                event = event,
+                includeReactions = includeReactions,
+                includeReviews = includeReviews,
+                reactionService = reactionService,
+                reviewService = reviewService,
+            )
 
             call.respond(responseEvent)
         }
+
+        post("/events/{event_id}/reviews") {
+            handleCreateEventReview(
+                call = call,
+                sessionService = sessionService,
+                ttlSeconds = config.sessionTtlSeconds,
+                reviewService = reviewService,
+            )
+        }
+
+        get("/events/{event_id}/reviews") {
+            handleGetEventReviews(
+                call = call,
+                sessionService = sessionService,
+                ttlSeconds = config.sessionTtlSeconds,
+                reviewService = reviewService,
+            )
+        }
+
+        patch("/events/{event_id}/reviews/{review_id}") {
+            handleUpdateEventReview(
+                call = call,
+                sessionService = sessionService,
+                ttlSeconds = config.sessionTtlSeconds,
+                reviewService = reviewService,
+            )
+        }
     }
 }
+
 private fun shouldIncludeReactions(call: ApplicationCall): Boolean =
-    call.request.queryParameters.getAll("include")?.contains("reactions") == true
+    requestIncludes(call, "reactions")
+
+private fun shouldIncludeReviews(call: ApplicationCall): Boolean =
+    requestIncludes(call, "reviews")
+
+private fun requestIncludes(call: ApplicationCall, value: String): Boolean =
+    call.request.queryParameters.getAll("include")
+        ?.flatMap { raw -> raw.split(",") }
+        ?.map { it.trim() }
+        ?.contains(value) == true
+
+private fun applyEventIncludes(
+    event: EventResponse,
+    includeReactions: Boolean,
+    includeReviews: Boolean,
+    reactionService: EventReactionService,
+    reviewService: EventReviewService,
+): EventResponse {
+    var response = event
+
+    if (includeReactions) {
+        response = reactionService.withReactions(response)
+    }
+
+    if (includeReviews) {
+        response = reviewService.withReviews(response)
+    }
+
+    return response
+}
+
+private fun applyEventIncludes(
+    events: List<EventResponse>,
+    includeReactions: Boolean,
+    includeReviews: Boolean,
+    reactionService: EventReactionService,
+    reviewService: EventReviewService,
+): List<EventResponse> =
+    events.map { event ->
+        applyEventIncludes(
+            event = event,
+            includeReactions = includeReactions,
+            includeReviews = includeReviews,
+            reactionService = reactionService,
+            reviewService = reviewService,
+        )
+    }
+
+private suspend fun handleCreateEventReview(
+    call: ApplicationCall,
+    sessionService: RedisSessionService,
+    ttlSeconds: Long,
+    reviewService: EventReviewService,
+) {
+    val sid = extractValidSid(call.request)
+    if (sid == null || !sessionService.refreshIfExists(sid)) {
+        call.respond(HttpStatusCode.Unauthorized)
+        return
+    }
+
+    setSessionCookie(call, sid, ttlSeconds)
+
+    val userId = sessionService.getUserId(sid)
+    if (userId == null) {
+        call.respond(HttpStatusCode.Unauthorized)
+        return
+    }
+
+    val eventIdRaw = call.parameters["event_id"]
+    val eventId = eventIdRaw?.let { parseObjectId(it) }
+    if (eventId == null) {
+        call.respond(HttpStatusCode.NotFound, ErrorResponse("Event not found"))
+        return
+    }
+
+    val payload = runCatching { call.receive<ReviewCreateRequest>() }.getOrNull()
+    if (payload == null) {
+        call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"body\" field"))
+        return
+    }
+
+    val invalidField = validateReviewCreateRequest(payload)
+    if (invalidField != null) {
+        call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"$invalidField\" field"))
+        return
+    }
+
+    val result = reviewService.createReview(
+        eventId = eventId,
+        userId = userId,
+        comment = payload.comment!!,
+        rating = payload.rating!!,
+    )
+
+    when (result.status) {
+        ReviewCreateStatus.CREATED -> {
+            call.respond(HttpStatusCode.Created, CreateReviewResponse(result.id!!))
+        }
+
+        ReviewCreateStatus.EVENT_NOT_FOUND -> {
+            call.respond(HttpStatusCode.NotFound, ErrorResponse("Event not found"))
+        }
+
+        ReviewCreateStatus.ALREADY_EXISTS -> {
+            call.respond(HttpStatusCode.Conflict, ErrorResponse("Already exists"))
+        }
+    }
+}
+
+private suspend fun handleGetEventReviews(
+    call: ApplicationCall,
+    sessionService: RedisSessionService,
+    ttlSeconds: Long,
+    reviewService: EventReviewService,
+) {
+    setSessionCookieIfExists(call, sessionService, ttlSeconds)
+
+    val eventIdRaw = call.parameters["event_id"]
+    val eventId = eventIdRaw?.let { parseObjectId(it) }
+    if (eventId == null) {
+        call.respond(HttpStatusCode.NotFound, ErrorResponse("Event not found"))
+        return
+    }
+
+    val limitRaw = call.request.queryParameters["limit"]
+    val offsetRaw = call.request.queryParameters["offset"]
+
+    val limit = parseUIntParameter(limitRaw)
+    if (limitRaw != null && limit == null) {
+        call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"limit\" field"))
+        return
+    }
+
+    val offset = parseUIntParameter(offsetRaw)
+    if (offsetRaw != null && offset == null) {
+        call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"offset\" field"))
+        return
+    }
+
+    val reviews = reviewService.findReviews(
+        eventId = eventId,
+        limit = limit,
+        offset = offset,
+    )
+
+    if (reviews == null) {
+        call.respond(HttpStatusCode.NotFound, ErrorResponse("Event not found"))
+        return
+    }
+
+    call.respond(ReviewsListResponse(reviews, reviews.size))
+}
+
+private suspend fun handleUpdateEventReview(
+    call: ApplicationCall,
+    sessionService: RedisSessionService,
+    ttlSeconds: Long,
+    reviewService: EventReviewService,
+) {
+    val sid = extractValidSid(call.request)
+    if (sid == null || !sessionService.refreshIfExists(sid)) {
+        call.respond(HttpStatusCode.Unauthorized)
+        return
+    }
+
+    setSessionCookie(call, sid, ttlSeconds)
+
+    val userId = sessionService.getUserId(sid)
+    if (userId == null) {
+        call.respond(HttpStatusCode.Unauthorized)
+        return
+    }
+
+    val eventIdRaw = call.parameters["event_id"]
+    val eventId = eventIdRaw?.let { parseObjectId(it) }
+    if (eventId == null) {
+        call.respond(HttpStatusCode.NotFound, ErrorResponse("Event not found"))
+        return
+    }
+
+    val reviewIdRaw = call.parameters["review_id"]
+    val reviewId = reviewIdRaw?.let { parseUuid(it) }
+    if (reviewId == null) {
+        call.respond(HttpStatusCode.NotFound, ErrorResponse("Event not found"))
+        return
+    }
+
+    val payload = runCatching { call.receive<ReviewPatchRequest>() }.getOrNull()
+    if (payload == null) {
+        call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"body\" field"))
+        return
+    }
+
+    val invalidField = validateReviewPatchRequest(payload)
+    if (invalidField != null) {
+        call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid \"$invalidField\" field"))
+        return
+    }
+
+    val updated = reviewService.updateReview(
+        eventId = eventId,
+        reviewId = reviewId,
+        userId = userId,
+        comment = payload.comment,
+        rating = payload.rating,
+    )
+
+    if (!updated) {
+        call.respond(HttpStatusCode.NotFound, ErrorResponse("Event not found"))
+        return
+    }
+
+    call.respond(HttpStatusCode.NoContent)
+}
 
 private suspend fun handleEventReaction(
     call: ApplicationCall,

@@ -21,7 +21,7 @@ services:
       - cassandra-net
 
   cassandra-init:
-    image: cassandra:latest
+    image: cassandra:5.0
     env_file:
       - .env.local
     depends_on:
