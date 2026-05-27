@@ -13,9 +13,11 @@ class RedisRecommendationsCache(
 
     fun get(userId: String): RecommendationsResponse? {
         return jedisPool.resource.use { jedis ->
-            val raw = jedis.hget(key(userId), "payload") ?: return null
+            val raw = jedis.hget(key(userId), "events") ?: return null
             runCatching {
-                json.decodeFromString<RecommendationsResponse>(raw)
+                RecommendationsResponse(
+                    events = json.decodeFromString(raw)
+                )
             }.getOrNull()
         }
     }
@@ -23,7 +25,7 @@ class RedisRecommendationsCache(
     fun put(userId: String, response: RecommendationsResponse) {
         jedisPool.resource.use { jedis ->
             val redisKey = key(userId)
-            jedis.hset(redisKey, "payload", json.encodeToString(response))
+            jedis.hset(redisKey, "events", json.encodeToString(response.events))
             jedis.expire(redisKey, ttlSeconds)
         }
     }
