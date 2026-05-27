@@ -6,12 +6,33 @@ services:
     ports:
       - "${APP_PORT}:${APP_PORT}"
     depends_on:
+      cassandra-init:
+        condition: service_completed_successfully
+      cassandra-dc1-node1:
+        condition: service_healthy
       redis:
         condition: service_started
       mongos:
         condition: service_started
       mongo-setup:
         condition: service_completed_successfully
+    networks:
+      - default
+      - cassandra-net
+
+  cassandra-init:
+    image: cassandra:latest
+    env_file:
+      - .env.local
+    depends_on:
+      cassandra-dc1-node1:
+        condition: service_healthy
+    volumes:
+      - ./scripts/cassandra-init.sh:/scripts/cassandra-init.sh:ro
+    entrypoint: [ "bash", "/scripts/cassandra-init.sh" ]
+    restart: "no"
+    networks:
+      - cassandra-net
 
   redis:
     image: redis:7-alpine
@@ -20,7 +41,7 @@ services:
 
   configsvr1:
     image: mongo:7.0
-    command: ["mongod", "--configsvr", "--replSet", "cfgRS", "--port", "27019", "--bind_ip_all"]
+    command: [ "mongod", "--configsvr", "--replSet", "cfgRS", "--port", "27019", "--bind_ip_all" ]
     ports:
       - "27019:27019"
     volumes:
@@ -28,7 +49,7 @@ services:
 
   configsvr2:
     image: mongo:7.0
-    command: ["mongod", "--configsvr", "--replSet", "cfgRS", "--port", "27020", "--bind_ip_all"]
+    command: [ "mongod", "--configsvr", "--replSet", "cfgRS", "--port", "27020", "--bind_ip_all" ]
     ports:
       - "27020:27020"
     volumes:
@@ -36,7 +57,7 @@ services:
 
   configsvr3:
     image: mongo:7.0
-    command: ["mongod", "--configsvr", "--replSet", "cfgRS", "--port", "27021", "--bind_ip_all"]
+    command: [ "mongod", "--configsvr", "--replSet", "cfgRS", "--port", "27021", "--bind_ip_all" ]
     ports:
       - "27021:27021"
     volumes:
@@ -44,7 +65,7 @@ services:
 
   shard1a:
     image: mongo:7.0
-    command: ["mongod", "--shardsvr", "--replSet", "shard1RS", "--port", "27101", "--bind_ip_all"]
+    command: [ "mongod", "--shardsvr", "--replSet", "shard1RS", "--port", "27101", "--bind_ip_all" ]
     ports:
       - "27101:27101"
     volumes:
@@ -52,7 +73,7 @@ services:
 
   shard1b:
     image: mongo:7.0
-    command: ["mongod", "--shardsvr", "--replSet", "shard1RS", "--port", "27102", "--bind_ip_all"]
+    command: [ "mongod", "--shardsvr", "--replSet", "shard1RS", "--port", "27102", "--bind_ip_all" ]
     ports:
       - "27102:27102"
     volumes:
@@ -60,7 +81,7 @@ services:
 
   shard1c:
     image: mongo:7.0
-    command: ["mongod", "--shardsvr", "--replSet", "shard1RS", "--port", "27103", "--bind_ip_all"]
+    command: [ "mongod", "--shardsvr", "--replSet", "shard1RS", "--port", "27103", "--bind_ip_all" ]
     ports:
       - "27103:27103"
     volumes:
@@ -68,7 +89,7 @@ services:
 
   shard2a:
     image: mongo:7.0
-    command: ["mongod", "--shardsvr", "--replSet", "shard2RS", "--port", "27201", "--bind_ip_all"]
+    command: [ "mongod", "--shardsvr", "--replSet", "shard2RS", "--port", "27201", "--bind_ip_all" ]
     ports:
       - "27201:27201"
     volumes:
@@ -76,7 +97,7 @@ services:
 
   shard2b:
     image: mongo:7.0
-    command: ["mongod", "--shardsvr", "--replSet", "shard2RS", "--port", "27202", "--bind_ip_all"]
+    command: [ "mongod", "--shardsvr", "--replSet", "shard2RS", "--port", "27202", "--bind_ip_all" ]
     ports:
       - "27202:27202"
     volumes:
@@ -84,7 +105,7 @@ services:
 
   shard2c:
     image: mongo:7.0
-    command: ["mongod", "--shardsvr", "--replSet", "shard2RS", "--port", "27203", "--bind_ip_all"]
+    command: [ "mongod", "--shardsvr", "--replSet", "shard2RS", "--port", "27203", "--bind_ip_all" ]
     ports:
       - "27203:27203"
     volumes:
@@ -92,7 +113,7 @@ services:
 
   mongos:
     image: mongo:7.0
-    command: ["mongos", "--configdb", "cfgRS/configsvr1:27019,configsvr2:27020,configsvr3:27021", "--bind_ip_all", "--port", "27017"]
+    command: [ "mongos", "--configdb", "cfgRS/configsvr1:27019,configsvr2:27020,configsvr3:27021", "--bind_ip_all", "--port", "27017" ]
     ports:
       - "${MONGODB_PORT}:27017"
     depends_on:
@@ -125,6 +146,35 @@ services:
       - ./mongo-cluster-init.sh:/scripts/mongo-cluster-init.sh:ro
     entrypoint: [ "bash", "/scripts/mongo-cluster-init.sh" ]
     restart: "no"
+
+  cassandra-dc1-node1:
+    image: cassandra:latest
+    container_name: cassandra-dc1-node1
+    environment:
+      - CASSANDRA_CLUSTER_NAME=IoTCLuster
+      - CASSANDRA_DC=dc1
+      - CASSANDRA_RACK=rack1
+      - CASSANDRA_ENDPOINT_SNITCH=GossipingPropertyFileSnitch
+      - CASSANDRA_SEEDS=cassandra-dc1-node1
+      - MAX_HEAP_SIZE=512M
+      - HEAP_NEWSIZE=128M
+    mem_limit: 2g
+    mem_reservation: 1g
+    ports:
+      - "${CASSANDRA_PORT}:${CASSANDRA_PORT}"
+    volumes:
+      - ./volume/dc1-node1:/var/lib/cassandra/data
+    networks:
+      - cassandra-net
+    healthcheck:
+      test: [ "CMD-SHELL", "cqlsh 127.0.0.1 9042 -e 'DESCRIBE KEYSPACES' > /dev/null 2>&1" ]
+      interval: 15s
+      timeout: 10s
+      retries: 30
+      start_period: 90s
+networks:
+  cassandra-net:
+    driver: bridge
 
 volumes:
   configsvr1_data:

@@ -101,6 +101,18 @@ class MongoEventRepository(database: MongoDatabase) {
         return documentToEventResponse(document)
     }
 
+    fun findEventTitleById(id: ObjectId): String? {
+        val document = collection.find(eq("_id", id)).firstOrNull() ?: return null
+        return documentString(document.get("title")).ifBlank { null }
+    }
+
+    fun findEventIdsByExactTitle(title: String): List<String> {
+        return collection.find(eq("title", title))
+            .map { document -> documentIdToString(document.get("_id")) }
+            .toList()
+            .filterNotNull()
+    }
+
     fun findEvents(query: EventSearchQuery): List<EventResponse> {
         if (query.createdByUserId == "__no_such_user__") {
             return emptyList()
