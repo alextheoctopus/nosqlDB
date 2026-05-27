@@ -4,6 +4,7 @@ class EventReactionService(
     private val eventRepository: MongoEventRepository,
     private val reactionRepository: CassandraEventReactionRepository,
     private val reactionCache: RedisEventReactionCache,
+    private val graphRepository: Neo4jRecommendationRepository,
 ) {
     fun setReaction(eventId: ObjectId, userId: String, likeValue: Int): Boolean {
         val eventTitle = eventRepository.findEventTitleById(eventId) ?: return false
@@ -13,6 +14,14 @@ class EventReactionService(
             userId = userId,
             likeValue = likeValue,
         )
+
+        if (likeValue == 1) {
+            graphRepository.createLikedRelation(
+                userId = userId,
+                eventId = eventId.toHexString(),
+                title = eventTitle,
+            )
+        }
 
         val eventIds = eventRepository.findEventIdsByExactTitle(eventTitle)
         val result = reactionRepository.countReactions(eventIds)

@@ -24,5 +24,10 @@ data class AppConfig(
     val cassandraPassword: String?,
     val cassandraKeyspace: String,
     val cassandraConsistency: DefaultConsistencyLevel,
+
+    val neo4jUrl: String,
+    val neo4jUsername: String,
+    val neo4jPassword: String,
+    val recommendationsTtlSeconds: Long,
 )
 

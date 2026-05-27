@@ -55,6 +55,23 @@ class MongoEventRepository(database: MongoDatabase) {
         }
     }
 
+    fun findEventsByIds(ids: List<String>): List<EventResponse> {
+        val objectIds = ids.mapNotNull { parseObjectId(it) }
+        if (objectIds.isEmpty()) {
+            return emptyList()
+        }
+
+        val documents = collection.find(com.mongodb.client.model.Filters.`in`("_id", objectIds))
+            .map { documentToEventResponse(it) }
+            .toList()
+
+        val order = ids.withIndex().associate { it.value to it.index }
+
+        return documents.sortedBy { event ->
+            order[event.id] ?: Int.MAX_VALUE
+        }
+    }
+
     fun patchEvent(
         id: ObjectId,
         organizerId: String,

@@ -10,6 +10,8 @@ import java.time.format.DateTimeFormatter
 import kotlinx.serialization.json.Json
 
 fun Application.module(config: AppConfig = loadConfig()) {
+
+
     val jedisPool = createJedisPool(config)
     val sessionService = RedisSessionService(jedisPool, config.sessionTtlSeconds)
 
@@ -23,6 +25,17 @@ fun Application.module(config: AppConfig = loadConfig()) {
 
     val cassandraSession = createCassandraSession(config)
 
+    val neo4jDriver = createNeo4jDriver(config)
+    val graphRepository = Neo4jRecommendationRepository(neo4jDriver)
+    val recommendationsCache = RedisRecommendationsCache(
+        jedisPool = jedisPool,
+        ttlSeconds = config.recommendationsTtlSeconds,
+    )
+    val recommendationService = RecommendationService(
+        graphRepository = graphRepository,
+        eventRepository = eventRepository,
+        cache = recommendationsCache,
+    )
 
     val reactionRepository = CassandraEventReactionRepository(
         session = cassandraSession,
@@ -36,6 +49,7 @@ fun Application.module(config: AppConfig = loadConfig()) {
         eventRepository = eventRepository,
         reactionRepository = reactionRepository,
         reactionCache = reactionCache,
+        graphRepository = graphRepository
     )
 
     val reviewRepository = CassandraEventReviewRepository(
@@ -58,6 +72,7 @@ fun Application.module(config: AppConfig = loadConfig()) {
         jedisPool.close()
         mongoClient.close()
         cassandraSession.close()
+        neo4jDriver.close()
     }
 
     install(ContentNegotiation) {
@@ -116,6 +131,7 @@ fun Application.module(config: AppConfig = loadConfig()) {
                 call.respond(HttpStatusCode.Conflict, ErrorResponse("user already exists"))
                 return@post
             }
+            graphRepository.createUser(createdUserId)
 
             if (hasActiveSession) {
                 sessionService.deleteSession(existingSid!!)
@@ -417,6 +433,11 @@ fun Application.module(config: AppConfig = loadConfig()) {
                 return@post
             }
 
+            graphRepository.createEvent(
+                eventId = eventId,
+                title = payload.title!!,
+            )
+
             call.respond(HttpStatusCode.Created, CreateEventResponse(eventId))
         }
 
@@ -495,6 +516,25 @@ fun Application.module(config: AppConfig = loadConfig()) {
             }
 
             call.respond(HttpStatusCode.NoContent)
+        }
+
+        get("/recommendations") {
+            val sid = extractValidSid(call.request)
+            if (sid == null || !sessionService.refreshIfExists(sid)) {
+                call.respond(HttpStatusCode.Unauthorized)
+                return@get
+            }
+
+            setSessionCookie(call, sid, config.sessionTtlSeconds)
+
+            val userId = sessionService.getUserId(sid)
+            if (userId == null) {
+                call.respond(HttpStatusCode.Unauthorized)
+                return@get
+            }
+
+            val response = recommendationService.getRecommendations(userId)
+            call.respond(response)
         }
 
         get("/events") {

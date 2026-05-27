@@ -25,6 +25,8 @@ dependencies {
     implementation(platform("org.mongodb:mongodb-driver-bom:5.5.0"))
     implementation("org.mongodb:mongodb-driver-kotlin-sync")
     implementation("org.mindrot:jbcrypt:0.4")
+
+    implementation("org.neo4j.driver:neo4j-java-driver:5.26.0")
 }
 
 kotlin {

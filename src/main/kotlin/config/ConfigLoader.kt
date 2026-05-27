@@ -30,4 +30,13 @@ fun loadConfig(): AppConfig = AppConfig(
     cassandraConsistency = DefaultConsistencyLevel.valueOf(
         System.getenv("CASSANDRA_CONSISTENCY").trim().trim('"')
     ),
+
+    neo4jUrl = System.getenv("NEO4J_URL").trim(),
+    neo4jUsername = System.getenv("NEO4J_USERNAME").trim(),
+    neo4jPassword = System.getenv("NEO4J_PASSWORD").trim(),
+    recommendationsTtlSeconds = System.getenv("APP_RECOMMENDATIONS_TTL")
+        .trim()
+        .substringBefore("#")
+        .trim()
+        .toLong(),
 )
