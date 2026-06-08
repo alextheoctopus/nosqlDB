@@ -80,3 +80,8 @@ data class ReviewsListResponse(
     val reviews: List<ReviewResponse>,
     val count: Int,
 )
+
+@Serializable
+data class RecommendationsResponse(
+    val events: List<EventResponse>,
+)

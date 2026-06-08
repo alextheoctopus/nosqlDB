@@ -6,6 +6,18 @@ import com.datastax.oss.driver.api.core.CqlSession
 import java.net.InetSocketAddress
 import com.datastax.oss.driver.api.core.session.SessionBuilder
 import com.datastax.oss.driver.api.core.CqlSessionBuilder
+
+import org.neo4j.driver.AuthTokens
+import org.neo4j.driver.Driver
+import org.neo4j.driver.GraphDatabase
+
+fun createNeo4jDriver(config: AppConfig): Driver {
+    return GraphDatabase.driver(
+        config.neo4jUrl,
+        AuthTokens.basic(config.neo4jUsername, config.neo4jPassword)
+    )
+}
+
 fun createJedisPool(config: AppConfig): JedisPool {
     val poolConfig = JedisPoolConfig().apply {
         maxTotal = 8
